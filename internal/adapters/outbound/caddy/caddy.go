@@ -32,11 +32,13 @@ const defaultServer = "srv0"
 type ErrorKind string
 
 const (
-	Timeout           ErrorKind = "timeout"
-	Unavailable       ErrorKind = "unavailable"
-	MalformedResponse ErrorKind = "malformed_response"
-	AdminConflict     ErrorKind = "conflict"
-	Rejected          ErrorKind = "rejected"
+	Timeout               ErrorKind = "timeout"
+	Unavailable           ErrorKind = "unavailable"
+	MalformedResponse     ErrorKind = "malformed_response"
+	AdminConflict         ErrorKind = "conflict"
+	Rejected              ErrorKind = "rejected"
+	RollbackIncomplete    ErrorKind = "rollback_incomplete"
+	RollbackIndeterminate ErrorKind = "rollback_indeterminate"
 )
 
 type Error struct {
@@ -61,17 +63,21 @@ type Config struct {
 	Timeout       time.Duration
 	RetryAttempts int
 	RetryDelay    time.Duration
+	// CompensationTimeout bounds rollback and final-state verification after a
+	// partially applied reconciliation. Zero selects two seconds.
+	CompensationTimeout time.Duration
 }
 
 // Client is safe for concurrent use. Its mutex closes local GET/change races;
 // a 409 from another admin client remains an explicit typed conflict.
 type Client struct {
-	base     *url.URL
-	server   string
-	http     *http.Client
-	attempts int
-	delay    time.Duration
-	mu       sync.Mutex
+	base                *url.URL
+	server              string
+	http                *http.Client
+	attempts            int
+	delay               time.Duration
+	compensationTimeout time.Duration
+	mu                  sync.Mutex
 }
 
 func New(cfg Config) (*Client, error) {
@@ -103,7 +109,11 @@ func New(cfg Config) (*Client, error) {
 	if delay <= 0 {
 		delay = 10 * time.Millisecond
 	}
-	return &Client{base: u, server: server, http: client, attempts: attempts, delay: delay}, nil
+	compensationTimeout := cfg.CompensationTimeout
+	if compensationTimeout <= 0 {
+		compensationTimeout = 2 * time.Second
+	}
+	return &Client{base: u, server: server, http: client, attempts: attempts, delay: delay, compensationTimeout: compensationTimeout}, nil
 }
 
 // RouteFor translates only validated domain values into a public hostname and
@@ -241,22 +251,38 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	all, err := c.fetch(ctx)
+	original, err := c.fetchRaw(ctx)
 	if err != nil {
 		return err
+	}
+	all := make([]caddyRoute, len(original))
+	for i := range original {
+		if err := json.Unmarshal(original[i], &all[i]); err != nil {
+			return &Error{MalformedResponse, err}
+		}
 	}
 
 	type change struct{ undo func(context.Context) error }
 	undos := make([]change, 0)
 	rollback := func(cause error) error {
-		var rollbackErr error
+		// Compensation must survive the caller deadline which commonly caused the
+		// failed mutation. It is independently bounded so Reconcile cannot hang.
+		compCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.compensationTimeout)
+		defer cancel()
+		var compensationErr error
 		for i := len(undos) - 1; i >= 0; i-- {
-			if err := undos[i].undo(ctx); err != nil && rollbackErr == nil {
-				rollbackErr = err
+			if err := undos[i].undo(compCtx); err != nil && compensationErr == nil {
+				compensationErr = err
 			}
 		}
-		if rollbackErr != nil {
-			return fmt.Errorf("%w (rollback failed: %v)", cause, rollbackErr)
+		current, verifyErr := c.fetchRaw(compCtx)
+		if verifyErr != nil {
+			return &Error{RollbackIndeterminate, fmt.Errorf("mutation failed: %w; compensation: %v; verification: %v", cause, compensationErr, verifyErr)}
+		}
+		wantJSON, _ := json.Marshal(original)
+		gotJSON, _ := json.Marshal(current)
+		if !bytes.Equal(wantJSON, gotJSON) {
+			return &Error{RollbackIncomplete, fmt.Errorf("mutation failed: %w; compensation: %v; final route state differs from snapshot", cause, compensationErr)}
 		}
 		return cause
 	}
@@ -276,22 +302,19 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 			delete(wanted, id)
 			continue
 		}
-		index, before := i, existing
-		if err := c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(index), encode(want)); err != nil {
-			return rollback(err)
-		}
+		index, before := i, original[i]
 		undos = append(undos, change{func(ctx context.Context) error {
 			return c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(index), before)
 		}})
+		if err := c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(index), encode(want)); err != nil {
+			return rollback(err)
+		}
 		delete(wanted, id)
 	}
 	// Then append missing records. Undo finds its namespaced identity rather
 	// than relying on a position that another Admin client could have shifted.
 	for _, want := range wanted {
 		added := want
-		if err := c.write(ctx, http.MethodPost, c.routesPath(), encode(added)); err != nil {
-			return rollback(err)
-		}
 		undos = append(undos, change{func(ctx context.Context) error {
 			current, err := c.fetch(ctx)
 			if err != nil {
@@ -304,15 +327,19 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 			}
 			return nil
 		}})
+		if err := c.write(ctx, http.MethodPost, c.routesPath(), encode(added)); err != nil {
+			return rollback(err)
+		}
 	}
 	// Finally remove orphans from highest to lowest index. The inverse POST to
 	// an array index inserts the exact saved object back at that index.
 	for i := len(all) - 1; i >= 0; i-- {
-		before := all[i]
-		if !owned(before.ID) {
+		existing := all[i]
+		before := original[i]
+		if !owned(existing.ID) {
 			continue
 		}
-		id := domain.LinkID(strings.TrimPrefix(before.ID, Namespace))
+		id := domain.LinkID(strings.TrimPrefix(existing.ID, Namespace))
 		if _, keep := wanted[id]; keep {
 			continue
 		} // wanted is empty for retained entries
@@ -329,12 +356,21 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 			continue
 		}
 		index := i
+		undos = append(undos, change{func(ctx context.Context) error {
+			current, err := c.fetchRaw(ctx)
+			if err != nil {
+				return err
+			}
+			for _, raw := range current {
+				if bytes.Equal(raw, before) {
+					return nil // failed/ambiguous DELETE did not remove it
+				}
+			}
+			return c.write(ctx, http.MethodPost, c.routesPath()+"/"+strconv.Itoa(index), before)
+		}})
 		if err := c.write(ctx, http.MethodDelete, c.routesPath()+"/"+strconv.Itoa(index), nil); err != nil {
 			return rollback(err)
 		}
-		undos = append(undos, change{func(ctx context.Context) error {
-			return c.write(ctx, http.MethodPost, c.routesPath()+"/"+strconv.Itoa(index), before)
-		}})
 	}
 	return nil
 }
@@ -358,6 +394,19 @@ func (c *Client) fetch(ctx context.Context) ([]caddyRoute, error) {
 	}
 	if out == nil {
 		return []caddyRoute{}, nil
+	}
+	return out, nil
+}
+
+// fetchRaw preserves the exact per-route JSON representation used to prove a
+// failed reconciliation restored both owned and unrelated routes exactly.
+func (c *Client) fetchRaw(ctx context.Context) ([]json.RawMessage, error) {
+	var out []json.RawMessage
+	if err := c.request(ctx, http.MethodGet, c.routesPath(), nil, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return []json.RawMessage{}, nil
 	}
 	return out, nil
 }

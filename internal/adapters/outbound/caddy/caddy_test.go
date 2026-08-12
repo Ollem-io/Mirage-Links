@@ -22,6 +22,7 @@ type fake struct {
 	writes      []string
 	fail        int
 	failWriteAt int
+	failWrites  map[int]bool
 	writeCount  int
 	status      int
 	bad         bool
@@ -49,7 +50,7 @@ func (f *fake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.writes = append(f.writes, r.Method+" "+r.URL.Path)
 	f.writeCount++
-	if f.failWriteAt > 0 && f.writeCount == f.failWriteAt {
+	if (f.failWriteAt > 0 && f.writeCount == f.failWriteAt) || f.failWrites[f.writeCount] {
 		http.Error(w, "injected", 400)
 		return
 	}
@@ -311,5 +312,78 @@ func TestAdditionalTransportAndMutationBranches(t *testing.T) {
 	}
 	if _, err = dead.List(context.Background()); !IsKind(err, Unavailable) {
 		t.Fatalf("%v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestReconcileCompensatesAfterCallerCancellationOrDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(context.CancelFunc)
+	}{
+		{"cancel", func(cancel context.CancelFunc) { cancel() }},
+		{"deadline", func(context.CancelFunc) { time.Sleep(2 * time.Millisecond) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, base := setup(t)
+			unrelated := json.RawMessage(`{"@id":"external","custom":{"raw":[3,2,1]}}`)
+			owned := json.RawMessage(`{"@id":"mirage-route-change","match":[{"host":["old"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"127.0.0.1:1"}]}],"terminal":true,"custom":"preserve raw"}`)
+			original := []json.RawMessage{unrelated, owned}
+			f.routes = append([]json.RawMessage(nil), original...)
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.name == "deadline" {
+				ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond)
+			}
+			defer cancel()
+			requests := 0
+			transport := http.DefaultTransport
+			base.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				requests++
+				// GET snapshot and first PUT complete. Stop the caller immediately
+				// before the later POST, after an undo has been registered.
+				if requests == 3 {
+					tc.stop(cancel)
+				}
+				return transport.RoundTrip(r)
+			})}
+			err := base.Reconcile(ctx, []ports.Route{
+				route("change", "new", "127.0.0.1:2"),
+				route("add", "added", "127.0.0.1:3"),
+			})
+			if !IsKind(err, Timeout) {
+				t.Fatalf("want original timeout/cancellation, got %v", err)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if len(f.routes) != len(original) {
+				t.Fatalf("route count %d, want %d", len(f.routes), len(original))
+			}
+			for i := range original {
+				if string(f.routes[i]) != string(original[i]) {
+					t.Fatalf("raw route %d not restored:\n got %s\nwant %s", i, f.routes[i], original[i])
+				}
+			}
+		})
+	}
+}
+
+func TestReconcileReportsRollbackIncompleteDistinctly(t *testing.T) {
+	f, c := setup(t)
+	original := []json.RawMessage{
+		json.RawMessage(`{"@id":"external","raw":"unchanged"}`),
+		mustJSON(t, encode(route("change", "old", "127.0.0.1:1"))),
+	}
+	f.routes = append([]json.RawMessage(nil), original...)
+	// First write succeeds, desired add fails, and compensating PUT fails.
+	f.failWrites = map[int]bool{2: true, 3: true}
+	err := c.Reconcile(context.Background(), []ports.Route{
+		route("change", "new", "127.0.0.1:2"),
+		route("add", "added", "127.0.0.1:3"),
+	})
+	if !IsKind(err, RollbackIncomplete) || IsKind(err, Rejected) {
+		t.Fatalf("want distinct rollback-incomplete error, got %v", err)
 	}
 }
