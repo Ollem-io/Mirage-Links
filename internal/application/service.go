@@ -4,6 +4,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -126,6 +127,36 @@ func (s *Service) Authorize(ctx context.Context, alias string, token domain.Toke
 		return domain.Space{}, e
 	}
 	return s.authenticate(ctx, a, token)
+}
+
+// SpaceForToken finds the active space represented by a bearer token. It is
+// intended for transports whose URL does not contain the space alias. The
+// repository never returns credentials; comparison remains delegated to the
+// constant-time token-hash port.
+func (s *Service) SpaceForToken(ctx context.Context, token domain.Token) (domain.Space, error) {
+	if s.Hashes == nil {
+		return domain.Space{}, fmt.Errorf("application: token hash port unavailable")
+	}
+	spaces, err := s.Repo.ListSpaces(ctx)
+	if err != nil {
+		return domain.Space{}, err
+	}
+	for _, sp := range spaces {
+		if !sp.Expired(s.now()) && s.Hashes.Verify(sp.TokenHash, token) {
+			return sp, nil
+		}
+	}
+	return domain.Space{}, domain.NewUnauthorized("invalid bearer token")
+}
+
+// GetSpace returns public-to-the-private-listener space metadata. It never
+// returns a token or token hash.
+func (s *Service) GetSpace(ctx context.Context, alias string) (domain.Space, error) {
+	a, err := domain.ParseAlias(alias)
+	if err != nil {
+		return domain.Space{}, err
+	}
+	return s.Repo.FindSpaceByAlias(ctx, a)
 }
 
 type DeleteSpaceInput struct {
@@ -379,6 +410,30 @@ func (s *Service) LogsFor(ctx context.Context, alias string, token domain.Token,
 		return nil, fmt.Errorf("application: logs port unavailable")
 	}
 	return s.Logs.Tail(ctx, l.ID, tail)
+}
+
+// FollowLogs authorizes and opens a cancellation-aware stream for one link.
+func (s *Service) FollowLogs(ctx context.Context, alias string, token domain.Token, name string) (io.ReadCloser, error) {
+	a, err := domain.ParseAlias(alias)
+	if err != nil {
+		return nil, err
+	}
+	sp, err := s.authenticate(ctx, a, token)
+	if err != nil {
+		return nil, err
+	}
+	n, err := domain.ParseLinkName(name)
+	if err != nil {
+		return nil, err
+	}
+	l, err := s.Repo.FindLink(ctx, sp.ID, n)
+	if err != nil {
+		return nil, err
+	}
+	if s.Logs == nil {
+		return nil, fmt.Errorf("application: logs port unavailable")
+	}
+	return s.Logs.Follow(ctx, l.ID)
 }
 
 type LinkMutationInput struct {
