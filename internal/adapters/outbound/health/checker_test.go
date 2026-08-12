@@ -131,3 +131,32 @@ func TestAdditionalClassifications(t *testing.T) {
 		t.Fatal("bad authority")
 	}
 }
+
+func TestPositiveTimeoutAndLoopbackRedirect(t *testing.T) {
+	if New(17*time.Millisecond).Client.Timeout != 17*time.Millisecond {
+		t.Fatal("positive timeout")
+	}
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	defer final.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, final.URL, 302) }))
+	defer redirect.Close()
+	if err := New(time.Second).Check(context.Background(), hc(t, "GET", redirect.URL)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInjectedTransportFailureAndGraceDefaultInterval(t *testing.T) {
+	c := &Checker{Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, context.DeadlineExceeded })}}
+	if c.Check(context.Background(), hc(t, "GET", "http://127.0.0.1:1/")) == nil {
+		t.Fatal("transport error")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if c.CheckUntil(ctx, hc(t, "GET", "http://127.0.0.1:1/"), time.Second, 0) == nil {
+		t.Fatal("cancel")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -9,12 +9,26 @@ import (
 	"github.com/primeintellect/mirage/internal/domain"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func buildFixture(t *testing.T) string {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "service")
+	cmd := exec.Command("go", "build", "-o", out, "./testdata/service")
+	cmd.Dir = "."
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fixture: %v: %s", err, b)
+	}
+	return out
+}
 
 func TestAllocatorReservesLoopbackAndRelease(t *testing.T) {
 	a := NewAllocator()
@@ -136,7 +150,8 @@ func TestNaturalExitForgetsIdentityAndAllocatedHandoff(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	a := NewAllocator()
-	id, p, e := s.StartAllocated(context.Background(), a, ports.StartRequest{Folder: dir, Command: "sleep 1"}, 2)
+	fixture := buildFixture(t)
+	id, p, e := s.startAllocated(context.Background(), a, ports.StartRequest{Folder: dir, Command: fixture + " healthy"}, 2, time.Second)
 	if e != nil || p.Number == 0 {
 		t.Fatal(id, p, e)
 	}
@@ -145,19 +160,50 @@ func TestNaturalExitForgetsIdentityAndAllocatedHandoff(t *testing.T) {
 	}
 }
 func TestStartAllocatedCollisionRetry(t *testing.T) {
-	// A pre-bound requested port makes direct Start fail; StartAllocated chooses a
-	// fresh port rather than reusing the collision.
-	l, e := net.Listen("tcp", "127.0.0.1:0")
-	if e != nil {
-		t.Fatal(e)
+	fixture := buildFixture(t)
+	a := NewAllocator()
+	var collision net.Listener
+	calls := 0
+	a.afterRelease = func(p ports.Port) {
+		calls++
+		if calls == 1 {
+			var err error
+			collision, err = net.Listen("tcp4", net.JoinHostPort(p.Address, strconv.Itoa(p.Number)))
+			if err != nil {
+				t.Fatalf("force release-window collision: %v", err)
+			}
+		}
 	}
-	defer l.Close()
-	bad := l.Addr().(*net.TCPAddr).Port
 	s := NewSupervisor(nil)
-	dir := t.TempDir()
-	id, p, e := s.StartAllocated(context.Background(), NewAllocator(), ports.StartRequest{Folder: dir, Command: "true"}, 2)
-	if e != nil || p.Number == bad {
-		t.Fatal(id, p, e)
+	id, p, err := s.startAllocated(context.Background(), a, ports.StartRequest{Folder: t.TempDir(), Command: fixture + " healthy"}, 2, 80*time.Millisecond)
+	if collision != nil {
+		_ = collision.Close()
+	}
+	if err != nil || calls != 2 {
+		t.Fatalf("id=%v port=%v calls=%d err=%v", id, p, calls, err)
+	}
+	if len(s.procs) != 1 {
+		t.Fatalf("failed attempt leaked ownership: %d", len(s.procs))
+	}
+	if err := s.Stop(context.Background(), id, time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartAllocatedNeverBindCleansEveryAttempt(t *testing.T) {
+	fixture := buildFixture(t)
+	s := NewSupervisor(nil)
+	beforeG := runtime.NumGoroutine()
+	_, p, err := s.startAllocated(context.Background(), NewAllocator(), ports.StartRequest{Folder: t.TempDir(), Command: fixture + " never-bind"}, 2, 40*time.Millisecond)
+	if err == nil || p.Number != 0 {
+		t.Fatalf("port=%v err=%v", p, err)
+	}
+	if len(s.procs) != 0 {
+		t.Fatalf("ownership leak: %d", len(s.procs))
+	}
+	time.Sleep(30 * time.Millisecond)
+	if runtime.NumGoroutine() > beforeG+4 {
+		t.Fatalf("goroutine leak: before=%d after=%d", beforeG, runtime.NumGoroutine())
 	}
 }
 
@@ -196,5 +242,141 @@ func TestStopUnknownNegativeGraceAndAlreadyExited(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if e := s.Stop(context.Background(), id, -time.Second); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestGracefulStopAndWaitHelpers(t *testing.T) {
+	s := NewSupervisor(nil)
+	id, err := s.Start(context.Background(), ports.StartRequest{Folder: t.TempDir(), Command: `trap 'exit 0' TERM; while :; do sleep 1; done`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Stop(context.Background(), id, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if s.find(id) != nil {
+		t.Fatal("not forgotten")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitGroup(ctx, syscall.Getpgrp(), time.Second) {
+		t.Fatal("live group reported dead")
+	}
+}
+
+func TestWaitBoundDeadAndCanceled(t *testing.T) {
+	s := NewSupervisor(nil)
+	id, err := s.Start(context.Background(), ports.StartRequest{Folder: t.TempDir(), Command: "exit 0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.waitBound(context.Background(), id, ports.Port{Number: 1}, 100*time.Millisecond); err == nil {
+		t.Fatal("dead accepted")
+	}
+	id, err = s.Start(context.Background(), ports.StartRequest{Folder: t.TempDir(), Command: "sleep 1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.waitBound(ctx, id, ports.Port{Number: 1}, time.Second); err == nil {
+		t.Fatal("cancel accepted")
+	}
+	_ = s.Stop(context.Background(), id, time.Second)
+}
+
+func TestStopInjectedBranches(t *testing.T) {
+	oldAlive, oldWait, oldKill := groupAliveCall, waitGroupCall, killGroupCall
+	defer func() { groupAliveCall, waitGroupCall, killGroupCall = oldAlive, oldWait, oldKill }()
+	s := NewSupervisor(nil)
+	id, err := s.Start(context.Background(), ports.StartRequest{Folder: t.TempDir(), Command: "sleep 10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := idPID(id)
+	groupAliveCall = func(int) bool { return false }
+	if err := s.Stop(context.Background(), id, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+
+	makeRun := func() ports.ProcessIdentity {
+		id, e := s.Start(context.Background(), ports.StartRequest{Folder: t.TempDir(), Command: "sleep 10"})
+		if e != nil {
+			t.Fatal(e)
+		}
+		return id
+	}
+	groupAliveCall = func(int) bool { return true }
+	killGroupCall = func(int, syscall.Signal) {}
+	id = makeRun()
+	waitGroupCall = func(context.Context, int, time.Duration) bool { return true }
+	if err := s.Stop(context.Background(), id, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_ = syscall.Kill(-idPID(id), syscall.SIGKILL)
+
+	id = makeRun()
+	waits := 0
+	waitGroupCall = func(context.Context, int, time.Duration) bool { waits++; return waits == 2 }
+	if err := s.Stop(context.Background(), id, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_ = syscall.Kill(-idPID(id), syscall.SIGKILL)
+
+	id = makeRun()
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	waitGroupCall = func(context.Context, int, time.Duration) bool { cancel2(); return false }
+	if err := s.Stop(ctx2, id, time.Second); err == nil {
+		t.Fatal("cancel after term")
+	}
+	_ = syscall.Kill(-idPID(id), syscall.SIGKILL)
+
+	id = makeRun()
+	calls := 0
+	waitGroupCall = func(context.Context, int, time.Duration) bool { calls++; return false }
+	if err := s.Stop(context.Background(), id, time.Second); err == nil {
+		t.Fatal("survival accepted")
+	}
+	_ = syscall.Kill(-idPID(id), syscall.SIGKILL)
+
+	id = makeRun()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Stop(ctx, id, time.Second); err == nil {
+		t.Fatal("cancel")
+	}
+	_ = syscall.Kill(-idPID(id), syscall.SIGKILL)
+}
+func idPID(id ports.ProcessIdentity) int {
+	p, _ := strconv.Atoi(strings.Split(id.Value, ":")[0])
+	return p
+}
+
+func TestStartAllocatedStartFailureAndMinimumAttempt(t *testing.T) {
+	s := NewSupervisor(nil)
+	_, _, err := s.startAllocated(context.Background(), NewAllocator(), ports.StartRequest{Folder: t.TempDir()}, 0, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "after 1") {
+		t.Fatal(err)
+	}
+}
+
+func TestAdditionalCanceledBranches(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := NewSupervisor(nil)
+	if _, err := s.Start(ctx, ports.StartRequest{Folder: t.TempDir(), Command: "true"}); err == nil {
+		t.Fatal("start cancel")
+	}
+	a := NewAllocator()
+	p, err := a.Allocate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Release(ctx, p); err == nil {
+		t.Fatal("release cancel")
+	}
+	if err := a.Release(context.Background(), p); err != nil {
+		t.Fatal(err)
 	}
 }

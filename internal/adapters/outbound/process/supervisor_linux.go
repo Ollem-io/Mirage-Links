@@ -127,6 +127,13 @@ func (s *Supervisor) find(id ports.ProcessIdentity) *running {
 	defer s.mu.Unlock()
 	return s.procs[id.Value]
 }
+
+var (
+	groupAliveCall = groupAlive
+	waitGroupCall  = waitGroup
+	killGroupCall  = func(pgid int, sig syscall.Signal) { _ = syscall.Kill(-pgid, sig) }
+)
+
 func (s *Supervisor) Stop(ctx context.Context, id ports.ProcessIdentity, grace time.Duration) error {
 	r := s.find(id)
 	if r == nil {
@@ -136,28 +143,29 @@ func (s *Supervisor) Stop(ctx context.Context, id ports.ProcessIdentity, grace t
 		grace = 0
 	}
 	pgid := r.cmd.Process.Pid
-	if !groupAlive(pgid) {
+	if !groupAliveCall(pgid) {
 		s.forget(id)
 		return nil
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	if waitGroup(ctx, pgid, grace) {
-		s.forget(id)
-		return nil
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	if waitGroup(ctx, pgid, time.Second) {
+	killGroupCall(pgid, syscall.SIGTERM)
+	if waitGroupCall(ctx, pgid, grace) {
 		s.forget(id)
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return fmt.Errorf("process group %d survived SIGKILL", pgid)
+	killGroupCall(pgid, syscall.SIGKILL)
+	if !waitGroupCall(ctx, pgid, time.Second) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("process group %d survived SIGKILL", pgid)
+	}
+	s.forget(id)
+	return nil
 }
+
 func groupAlive(pgid int) bool {
 	err := syscall.Kill(-pgid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)

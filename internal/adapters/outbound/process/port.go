@@ -11,8 +11,9 @@ import (
 // Allocator reserves IPv4 loopback TCP ports until Release. Holding the
 // listener makes allocation races and accidental public binding impossible.
 type Allocator struct {
-	mu        sync.Mutex
-	listeners map[int]net.Listener
+	mu           sync.Mutex
+	listeners    map[int]net.Listener
+	afterRelease func(ports.Port)
 }
 
 func NewAllocator() *Allocator { return &Allocator{listeners: make(map[int]net.Listener)} }
@@ -43,5 +44,9 @@ func (a *Allocator) Release(ctx context.Context, p ports.Port) error {
 	if !ok {
 		return nil
 	}
-	return l.Close()
+	err := l.Close()
+	if a.afterRelease != nil {
+		a.afterRelease(p)
+	}
+	return err
 }
