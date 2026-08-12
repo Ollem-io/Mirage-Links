@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/primeintellect/mirage/internal/application/ports"
@@ -16,12 +15,11 @@ import (
 	_ "github.com/tursodatabase/go-libsql"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // Embedded libSQL applies PRAGMA foreign_keys per connection. A single owned
 // connection makes that invariant durable for every operation (and avoids a
 // pool silently issuing work on a connection without foreign-key enforcement).
-var openMigrationMu sync.Mutex
 
 // Store owns an embedded libSQL connection. It is safe for concurrent use.
 type Store struct{ db *sql.DB }
@@ -47,10 +45,8 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("libsql: enable foreign keys: %w", err)
 	}
-	// Serializes in-process simultaneous Open calls before schema DDL. The
-	// migration transaction remains safe against other processes.
-	openMigrationMu.Lock()
-	defer openMigrationMu.Unlock()
+	// migrate obtains SQLite's database-level write lock, so independent Mirage
+	// processes cannot concurrently observe and apply the same schema version.
 	s := &Store{db: db}
 	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
@@ -66,39 +62,109 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("libsql: begin migration: %w", err)
+		return fmt.Errorf("libsql: migration connection: %w", err)
 	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL)`); err != nil {
-		return err
+	defer conn.Close()
+	// BEGIN IMMEDIATE takes the database write lock before reading the version.
+	// Retry lock contention for a bounded period because go-libsql does not expose
+	// SQLite busy_timeout as an Exec-able pragma.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, err = conn.ExecContext(ctx, `BEGIN IMMEDIATE`)
+		if err == nil {
+			break
+		}
+		if !contains(err.Error(), "locked") || time.Now().After(deadline) {
+			return fmt.Errorf("libsql: acquire migration lock: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("libsql: acquire migration lock: %w", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if _, err = conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL)`); err != nil {
+		return fmt.Errorf("libsql: create migration ledger: %w", err)
 	}
 	var version int
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version)
-	if err != nil {
-		return err
+	if err = conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+		return fmt.Errorf("libsql: read schema version: %w", err)
 	}
 	if version > currentSchemaVersion {
 		return fmt.Errorf("libsql: unsupported schema version %d", version)
 	}
 	if version < 1 {
-		// Archive fields preserve lifecycle history while normal reads exclude deleted spaces.
-		stmts := []string{
+		// Version 1 is immutable: existing installations must have the exact
+		// originally shipped schema so all later changes exercise the upgrade path.
+		v1 := []string{
 			`CREATE TABLE spaces (id TEXT PRIMARY KEY NOT NULL, alias TEXT NOT NULL UNIQUE, token_hash BLOB NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, deleted_at INTEGER)`,
-			`CREATE TABLE links (id TEXT PRIMARY KEY NOT NULL, space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE, name TEXT NOT NULL, status TEXT NOT NULL, command TEXT NOT NULL, folder TEXT NOT NULL, health_method TEXT NOT NULL, health_url TEXT NOT NULL, grace_ns INTEGER NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, allocated_port INTEGER, process_identity TEXT, restart_count INTEGER NOT NULL DEFAULT 0, next_restart_at INTEGER, deleted_at INTEGER, UNIQUE(space_id, name))`,
+			`CREATE TABLE links (id TEXT PRIMARY KEY NOT NULL, space_id TEXT NOT NULL REFERENCES spaces(id), name TEXT NOT NULL, status TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, allocated_port INTEGER, process_identity TEXT, restart_count INTEGER NOT NULL DEFAULT 0, next_restart_at INTEGER, deleted_at INTEGER, UNIQUE(space_id, name))`,
 			`CREATE INDEX links_by_expiry ON links(expires_at)`,
 			`CREATE INDEX links_by_reconcile ON links(status, expires_at)`,
 			`CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, space_id TEXT NOT NULL, link_id TEXT, action TEXT NOT NULL, reason TEXT NOT NULL)`,
 			`INSERT INTO schema_migrations(version) VALUES (1)`,
 		}
-		for _, stmt := range stmts {
-			if _, err = tx.ExecContext(ctx, stmt); err != nil {
-				return fmt.Errorf("libsql: migrate v1: %w", err)
-			}
+		if err = execMigration(ctx, conn, "v1", v1); err != nil {
+			return err
+		}
+		version = 1
+	}
+	if version < 2 {
+		// Add recovery metadata first, then rebuild links to strengthen the original
+		// foreign key with ON DELETE CASCADE while preserving every v1 row.
+		v2 := []string{
+			`ALTER TABLE links ADD COLUMN command TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE links ADD COLUMN folder TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE links ADD COLUMN health_method TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE links ADD COLUMN health_url TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE links ADD COLUMN grace_ns INTEGER NOT NULL DEFAULT 0`,
+			`DROP INDEX links_by_expiry`, `DROP INDEX links_by_reconcile`,
+			`ALTER TABLE links RENAME TO links_v1`,
+			`CREATE TABLE links (id TEXT PRIMARY KEY NOT NULL, space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE, name TEXT NOT NULL, status TEXT NOT NULL, command TEXT NOT NULL, folder TEXT NOT NULL, health_method TEXT NOT NULL, health_url TEXT NOT NULL, grace_ns INTEGER NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, allocated_port INTEGER, process_identity TEXT, restart_count INTEGER NOT NULL DEFAULT 0, next_restart_at INTEGER, deleted_at INTEGER, UNIQUE(space_id, name))`,
+			`INSERT INTO links SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,created_at,updated_at,allocated_port,process_identity,restart_count,next_restart_at,deleted_at FROM links_v1`,
+			`DROP TABLE links_v1`,
+			`CREATE INDEX links_by_expiry ON links(expires_at)`, `CREATE INDEX links_by_reconcile ON links(status, expires_at)`,
+			`INSERT INTO schema_migrations(version) VALUES (2)`,
+		}
+		if err = execMigration(ctx, conn, "v2", v2); err != nil {
+			return err
 		}
 	}
-	return tx.Commit()
+	for {
+		_, err = conn.ExecContext(ctx, `COMMIT`)
+		if err == nil {
+			break
+		}
+		if !contains(err.Error(), "locked") || time.Now().After(deadline) {
+			return fmt.Errorf("libsql: commit migration: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("libsql: commit migration: %w", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	committed = true
+	return nil
+}
+
+func execMigration(ctx context.Context, q interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, version string, statements []string) error {
+	for _, statement := range statements {
+		if _, err := q.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("libsql: migrate %s: %w", version, err)
+		}
+	}
+	return nil
 }
 
 type runner interface {
@@ -310,12 +376,18 @@ func (r repository) DeleteLink(c context.Context, id domain.LinkID) error {
 
 // ActiveSpaces returns non-archived spaces whose expiry is strictly after now.
 func (s *Store) ActiveSpaces(c context.Context, now time.Time) ([]domain.Space, error) {
-	return querySpaces(c, s.db, `SELECT id,alias,token_hash,expires_at FROM spaces WHERE deleted_at IS NULL AND expires_at>? ORDER BY expires_at,id`, unix(now))
+	return repository{s.db}.ActiveSpaces(c, now)
+}
+func (r repository) ActiveSpaces(c context.Context, now time.Time) ([]domain.Space, error) {
+	return querySpaces(c, r.q, `SELECT id,alias,token_hash,expires_at FROM spaces WHERE deleted_at IS NULL AND expires_at>? ORDER BY expires_at,id`, unix(now))
 }
 
 // ExpiredSpaces returns non-archived spaces expiring at or before now.
 func (s *Store) ExpiredSpaces(c context.Context, now time.Time) ([]domain.Space, error) {
-	return querySpaces(c, s.db, `SELECT id,alias,token_hash,expires_at FROM spaces WHERE deleted_at IS NULL AND expires_at<=? ORDER BY expires_at,id`, unix(now))
+	return repository{s.db}.ExpiredSpaces(c, now)
+}
+func (r repository) ExpiredSpaces(c context.Context, now time.Time) ([]domain.Space, error) {
+	return querySpaces(c, r.q, `SELECT id,alias,token_hash,expires_at FROM spaces WHERE deleted_at IS NULL AND expires_at<=? ORDER BY expires_at,id`, unix(now))
 }
 func querySpaces(c context.Context, q runner, stmt string, args ...any) ([]domain.Space, error) {
 	rows, e := q.QueryContext(c, stmt, args...)
@@ -336,12 +408,18 @@ func querySpaces(c context.Context, q runner, stmt string, args ...any) ([]domai
 
 // ExpiredLinks returns live links whose expiry is at or before now, ordered to make cleanup deterministic.
 func (s *Store) ExpiredLinks(c context.Context, now time.Time) ([]domain.Link, error) {
-	return queryLinks(c, s.db, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at FROM links WHERE deleted_at IS NULL AND expires_at<=? ORDER BY expires_at,id`, unix(now))
+	return repository{s.db}.ExpiredLinks(c, now)
+}
+func (r repository) ExpiredLinks(c context.Context, now time.Time) ([]domain.Link, error) {
+	return queryLinks(c, r.q, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at FROM links WHERE deleted_at IS NULL AND expires_at<=? ORDER BY expires_at,id`, unix(now))
 }
 
 // ReconciliationLinks returns live, nonterminal links deterministically.
 func (s *Store) ReconciliationLinks(c context.Context, now time.Time) ([]domain.Link, error) {
-	return queryLinks(c, s.db, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at FROM links WHERE deleted_at IS NULL AND expires_at>? AND status NOT IN (?,?) ORDER BY id`, unix(now), domain.StatusDeleted, domain.StatusExpired)
+	return repository{s.db}.ReconciliationLinks(c, now)
+}
+func (r repository) ReconciliationLinks(c context.Context, now time.Time) ([]domain.Link, error) {
+	return queryLinks(c, r.q, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at FROM links WHERE deleted_at IS NULL AND expires_at>? AND status NOT IN (?,?) ORDER BY id`, unix(now), domain.StatusDeleted, domain.StatusExpired)
 }
 func queryLinks(c context.Context, q runner, stmt string, args ...any) ([]domain.Link, error) {
 	rows, e := q.QueryContext(c, stmt, args...)

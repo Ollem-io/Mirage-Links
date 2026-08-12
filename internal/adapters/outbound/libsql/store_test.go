@@ -3,7 +3,9 @@ package libsql
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -398,5 +400,109 @@ func TestSpaceBoundaryQueriesAndConcurrentOpen(t *testing.T) {
 	expired, e := s.ExpiredSpaces(context.Background(), now)
 	if e != nil || len(expired) != 2 || expired[0].ID != "before" || expired[1].ID != "at" {
 		t.Fatalf("expired %#v %v", expired, e)
+	}
+}
+
+func TestCrossProcessMigrationContention(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "contended.db")
+	const processes = 8
+	start := make(chan struct{})
+	errs := make(chan error, processes)
+	for range processes {
+		go func() {
+			<-start
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMigrationProcessHelper$")
+			cmd.Env = append(os.Environ(), "MIRAGE_MIGRATION_HELPER=1", "MIRAGE_MIGRATION_PATH="+path)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				errs <- fmt.Errorf("helper: %w: %s", err, output)
+				return
+			}
+			errs <- nil
+		}()
+	}
+	close(start)
+	for range processes {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var versions, max int
+	if err = s.db.QueryRow(`SELECT count(*), max(version) FROM schema_migrations`).Scan(&versions, &max); err != nil || versions != currentSchemaVersion || max != currentSchemaVersion {
+		t.Fatalf("migration ledger count=%d max=%d err=%v", versions, max, err)
+	}
+}
+
+// TestMigrationProcessHelper is entered only by independently executed copies of
+// the test binary. It makes TestCrossProcessMigrationContention a real OS-process
+// contention test rather than an in-process goroutine approximation.
+func TestMigrationProcessHelper(t *testing.T) {
+	if os.Getenv("MIRAGE_MIGRATION_HELPER") != "1" {
+		t.Skip("helper process")
+	}
+	s, err := Open(os.Getenv("MIRAGE_MIGRATION_PATH"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpgradeOriginalV1Fixture(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.db")
+	db, err := sql.Open("libsql", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	token, _ := domain.NewToken()
+	v1 := []string{
+		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL)`,
+		`CREATE TABLE spaces (id TEXT PRIMARY KEY NOT NULL, alias TEXT NOT NULL UNIQUE, token_hash BLOB NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, deleted_at INTEGER)`,
+		`CREATE TABLE links (id TEXT PRIMARY KEY NOT NULL, space_id TEXT NOT NULL REFERENCES spaces(id), name TEXT NOT NULL, status TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, allocated_port INTEGER, process_identity TEXT, restart_count INTEGER NOT NULL DEFAULT 0, next_restart_at INTEGER, deleted_at INTEGER, UNIQUE(space_id, name))`,
+		`CREATE INDEX links_by_expiry ON links(expires_at)`,
+		`CREATE INDEX links_by_reconcile ON links(status, expires_at)`,
+		`CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, space_id TEXT NOT NULL, link_id TEXT, action TEXT NOT NULL, reason TEXT NOT NULL)`,
+		`INSERT INTO schema_migrations(version) VALUES (1)`,
+	}
+	for _, statement := range v1 {
+		if _, err = db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec(`INSERT INTO spaces(id,alias,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)`, "s", "legacy", func() []byte { h := token.Hash(); return h[:] }(), unix(now.Add(time.Hour)), unix(now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO links(id,space_id,name,status,expires_at,created_at,updated_at,allocated_port,process_identity,restart_count,next_restart_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "l", "s", "api", domain.StatusActive, unix(now.Add(time.Hour)), unix(now), unix(now), 4321, "pid:7", 2, unix(now.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.FindLink(context.Background(), "s", "api")
+	if err != nil || got.AllocatedPort != 4321 || got.ProcessIdentity != "pid:7" || got.RestartCount != 2 || got.Command != "" || got.Folder != "" || got.Grace != 0 {
+		t.Fatalf("upgraded legacy row: %#v %v", got, err)
+	}
+	var version int
+	if err = s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 2 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	if _, err = s.db.Exec(`DELETE FROM spaces WHERE id='s'`); err != nil {
+		t.Fatal(err)
+	}
+	var links int
+	if err = s.db.QueryRow(`SELECT count(*) FROM links WHERE id='l'`).Scan(&links); err != nil || links != 0 {
+		t.Fatalf("upgraded foreign key did not cascade: %d %v", links, err)
 	}
 }

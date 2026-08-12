@@ -14,6 +14,8 @@ type SpaceRepository interface {
 	FindSpace(context.Context, domain.SpaceID) (domain.Space, error)
 	FindSpaceByAlias(context.Context, domain.Alias) (domain.Space, error)
 	ListSpaces(context.Context) ([]domain.Space, error)
+	ActiveSpaces(context.Context, time.Time) ([]domain.Space, error)
+	ExpiredSpaces(context.Context, time.Time) ([]domain.Space, error)
 	DeleteSpace(context.Context, domain.SpaceID) error
 }
 type LinkRepository interface {
@@ -21,6 +23,8 @@ type LinkRepository interface {
 	FindLink(context.Context, domain.SpaceID, domain.LinkName) (domain.Link, error)
 	ListLinks(context.Context, domain.SpaceID) ([]domain.Link, error)
 	SaveLink(context.Context, domain.Link) error
+	ExpiredLinks(context.Context, time.Time) ([]domain.Link, error)
+	ReconciliationLinks(context.Context, time.Time) ([]domain.Link, error)
 	DeleteLink(context.Context, domain.LinkID) error
 }
 type Repository interface {
