@@ -17,13 +17,15 @@ import (
 )
 
 type fake struct {
-	err     error
-	space   domain.Space
-	link    domain.Link
-	token   domain.Token
-	entered chan struct{}
-	release chan struct{}
-	reader  io.ReadCloser
+	err         error
+	space       domain.Space
+	link        domain.Link
+	token       domain.Token
+	entered     chan struct{}
+	release     chan struct{}
+	reader      io.ReadCloser
+	deleted     []application.DeleteSpaceInput
+	linkChanges []application.LinkMutationInput
 }
 
 func (f *fake) CreateSpace(c context.Context, i application.CreateSpaceInput) (application.CreateSpaceResult, error) {
@@ -35,8 +37,11 @@ func (f *fake) CreateSpace(c context.Context, i application.CreateSpaceInput) (a
 func (f *fake) ListSpaces(context.Context) ([]domain.Space, error) {
 	return []domain.Space{f.space}, f.err
 }
-func (f *fake) GetSpace(ctx context.Context, s string) (domain.Space, error)    { return f.space, f.err }
-func (f *fake) DeleteSpace(context.Context, application.DeleteSpaceInput) error { return f.err }
+func (f *fake) GetSpace(ctx context.Context, s string) (domain.Space, error) { return f.space, f.err }
+func (f *fake) DeleteSpace(_ context.Context, in application.DeleteSpaceInput) error {
+	f.deleted = append(f.deleted, in)
+	return f.err
+}
 func (f *fake) SpaceForToken(context.Context, domain.Token) (domain.Space, error) {
 	return f.space, f.err
 }
@@ -59,10 +64,14 @@ func (f *fake) FollowLogs(context.Context, string, domain.Token, string) (io.Rea
 	}
 	return io.NopCloser(strings.NewReader(`{"text":"safe"}`)), f.err
 }
-func (f *fake) RestartLink(context.Context, application.LinkMutationInput) (application.CreateLinkResult, error) {
+func (f *fake) RestartLink(_ context.Context, in application.LinkMutationInput) (application.CreateLinkResult, error) {
+	f.linkChanges = append(f.linkChanges, in)
 	return application.CreateLinkResult{Link: f.link}, f.err
 }
-func (f *fake) DeleteLink(context.Context, application.LinkMutationInput) error { return f.err }
+func (f *fake) DeleteLink(_ context.Context, in application.LinkMutationInput) error {
+	f.linkChanges = append(f.linkChanges, in)
+	return f.err
+}
 func fixture() *fake {
 	return &fake{space: domain.Space{Alias: "calm", ExpiresAt: time.Now().Add(time.Hour), TokenHash: domain.Token("SECRET_HASH").Hash()}, link: domain.Link{Name: "api", Status: domain.StatusActive, ExpiresAt: time.Now().Add(time.Hour)}}
 }

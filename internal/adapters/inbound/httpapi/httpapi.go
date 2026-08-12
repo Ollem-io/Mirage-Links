@@ -104,6 +104,10 @@ func (a *API) middleware(next http.Handler) http.Handler {
 	})
 }
 func (a *API) route(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/" || r.URL.Path == "/dashboard" || strings.HasPrefix(r.URL.Path, "/dashboard/") {
+		a.dashboard(w, r)
+		return
+	}
 	if r.URL.Path == "/healthz" {
 		if r.Method != "GET" {
 			method(w)

@@ -29,8 +29,16 @@ description = "Run the Go test suite"
 run = "go test ./..."
 
 [tasks.assets]
-description = "Verify the pinned Tailwind asset tool is available"
-run = "tailwindcss --help >/dev/null"
+description = "Rebuild reproducible embedded Tailwind v4 dashboard CSS and reject drift"
+run = '''set -eu
+D=internal/adapters/inbound/httpapi
+out=$(mktemp)
+mkdir -p "$D/node_modules"
+ln -sf "${MISE_DATA_DIR:-$HOME/.local/share/mise}/installs/npm-tailwindcss-cli/4.1.17/node_modules/.mise/tailwindcss@4.1.17/node_modules/tailwindcss" "$D/node_modules/tailwindcss"
+trap 'rm -rf "$D/node_modules" "$out"' EXIT
+tailwindcss -i "$D/dashboard.tailwind.css" -o "$out" --minify
+cmp "$out" "$D/dashboard.css"
+grep -q 'tailwindcss v4.1.17' "$D/dashboard.css"'''
 
 [tasks.e2e]
 description = "Run bootstrap black-box end-to-end smoke test"
@@ -60,7 +68,20 @@ run = "./scripts/smoke.sh"
 
 [tasks.check]
 description = "Run formatting, tests, coverage, build, and black-box smoke checks"
-depends = ["fmt-check", "lint", "test", "coverage", "coverage-mir05", "coverage-mir06", "mir06-scenario", "build", "smoke"]
+depends = ["fmt-check", "lint", "test", "coverage", "coverage-mir05", "coverage-mir06", "mir06-scenario", "assets", "coverage-mir07", "coverage-mir08", "dashboard-artifact", "build", "smoke"]
+
+
+
+[tasks.coverage-mir08]
+description = "Enforce dashboard and aggregate HTTP adapter coverage"
+run = '''set -eu
+go test -coverprofile=/tmp/mirage-dashboard.cover ./internal/adapters/inbound/httpapi
+go tool cover -func=/tmp/mirage-dashboard.cover | awk '/dashboard.go/ { n += $3 + 0; d++ } END { if (!d || n/d < 85) exit 1 }'
+go tool cover -func=/tmp/mirage-dashboard.cover | awk '/^total:/ {gsub(/%/, "", $3); if ($3 < 90) exit 1}' '''
+
+[tasks.dashboard-artifact]
+description = "Run seeded private-dashboard HTTP/DOM smoke artifact"
+run = "./scripts/dashboard_artifact.sh"
 
 [tasks.test-domain]
 description = "Run domain contract tests"

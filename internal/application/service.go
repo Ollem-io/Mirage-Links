@@ -440,6 +440,8 @@ type LinkMutationInput struct {
 	Alias string
 	Token domain.Token
 	Name  string
+	// Reason identifies an operator dashboard action; no credential is recorded.
+	Reason string
 }
 
 func (s *Service) DeleteLink(ctx context.Context, in LinkMutationInput) error {
@@ -460,6 +462,14 @@ func (s *Service) DeleteLink(ctx context.Context, in LinkMutationInput) error {
 			}
 		}
 		return e
+	}
+	if strings.TrimSpace(in.Reason) != "" {
+		if s.Audit == nil {
+			return fmt.Errorf("application: audit port unavailable")
+		}
+		if e := s.Audit.Record(ctx, ports.AuditEvent{At: s.now(), SpaceID: sp.ID, LinkID: l.ID, Action: "delete_link", Reason: in.Reason}); e != nil {
+			return e
+		}
 	}
 	return s.destroy(ctx, l, domain.StatusDeleted)
 }
@@ -526,6 +536,14 @@ func (s *Service) RestartLink(ctx context.Context, in LinkMutationInput) (Create
 	if l.Expired(s.now()) {
 		_ = s.destroy(ctx, l, domain.StatusExpired)
 		return CreateLinkResult{}, domain.NewNotFound("link expired")
+	}
+	if strings.TrimSpace(in.Reason) != "" {
+		if s.Audit == nil {
+			return CreateLinkResult{}, fmt.Errorf("application: audit port unavailable")
+		}
+		if e = s.Audit.Record(ctx, ports.AuditEvent{At: s.now(), SpaceID: sp.ID, LinkID: l.ID, Action: "restart_link", Reason: in.Reason}); e != nil {
+			return CreateLinkResult{}, e
+		}
 	}
 	if e = s.destroyForRestart(ctx, l); e != nil {
 		return CreateLinkResult{}, e
