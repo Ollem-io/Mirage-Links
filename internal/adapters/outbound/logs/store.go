@@ -25,8 +25,9 @@ type record struct {
 	size  int
 }
 type follower struct {
-	pipe *io.PipeWriter
-	done chan struct{}
+	pipe  *io.PipeWriter
+	done  chan struct{}
+	queue chan []byte
 }
 type linkLog struct {
 	records   []record
@@ -99,21 +100,15 @@ func (s *Store) Append(ctx context.Context, id domain.LinkID, entry ports.LogEnt
 	}
 	b, _ := json.Marshal(entry)
 	b = append(b, '\n')
-	followers := make([]*follower, 0, len(l.followers))
+	// A follower has one bounded writer worker. Slow clients lose new records
+	// rather than blocking capture or creating unbounded goroutines/memory.
 	for f := range l.followers {
-		followers = append(followers, f)
-	}
-	// Pipe writes can block behind a slow client. Never let that stall child
-	// output capture; cancellation/Close releases the write promptly.
-	for _, f := range followers {
-		go s.writeFollower(id, f, b)
+		select {
+		case f.queue <- b:
+		default:
+		}
 	}
 	return nil
-}
-func (s *Store) writeFollower(id domain.LinkID, f *follower, b []byte) {
-	if _, err := f.pipe.Write(b); err != nil {
-		s.remove(id, f, err)
-	}
 }
 func (s *Store) Tail(ctx context.Context, id domain.LinkID, n int) ([]ports.LogEntry, error) {
 	if err := ctx.Err(); err != nil {
@@ -143,7 +138,7 @@ func (s *Store) Follow(ctx context.Context, id domain.LinkID) (io.ReadCloser, er
 		return nil, err
 	}
 	r, w := io.Pipe()
-	f := &follower{w, make(chan struct{})}
+	f := &follower{pipe: w, done: make(chan struct{}), queue: make(chan []byte, 64)}
 	s.mu.Lock()
 	l := s.get(id)
 	if l.closed {
@@ -153,6 +148,7 @@ func (s *Store) Follow(ctx context.Context, id domain.LinkID) (io.ReadCloser, er
 	}
 	l.followers[f] = struct{}{}
 	s.mu.Unlock()
+	go s.runFollower(id, f)
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -162,6 +158,20 @@ func (s *Store) Follow(ctx context.Context, id domain.LinkID) (io.ReadCloser, er
 	}()
 	return r, nil
 }
+func (s *Store) runFollower(id domain.LinkID, f *follower) {
+	for {
+		select {
+		case b := <-f.queue:
+			if _, err := f.pipe.Write(b); err != nil {
+				s.remove(id, f, err)
+				return
+			}
+		case <-f.done:
+			return
+		}
+	}
+}
+
 func (s *Store) remove(id domain.LinkID, f *follower, err error) {
 	s.mu.Lock()
 	if l := s.links[id]; l != nil {

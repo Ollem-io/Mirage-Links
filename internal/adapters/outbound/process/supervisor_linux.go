@@ -37,6 +37,7 @@ type Supervisor struct {
 	mu    sync.Mutex
 	procs map[string]*running
 	logs  sink
+	next  uint64
 }
 
 func NewSupervisor(logSink sink) *Supervisor {
@@ -86,9 +87,11 @@ func (s *Supervisor) Start(ctx context.Context, r ports.StartRequest) (ports.Pro
 	if err = cmd.Start(); err != nil {
 		return ports.ProcessIdentity{}, fmt.Errorf("start process: %w", err)
 	}
-	id := strconv.Itoa(cmd.Process.Pid)
 	run := &running{cmd: cmd, done: make(chan struct{})}
 	s.mu.Lock()
+	s.next++
+	// A generation makes identities unambiguous even if the OS quickly reuses a PID.
+	id := strconv.Itoa(cmd.Process.Pid) + ":" + strconv.FormatUint(s.next, 10)
 	s.procs[id] = run
 	s.mu.Unlock()
 	go s.capture(r.LinkID, "stdout", stdout)
@@ -96,6 +99,13 @@ func (s *Supervisor) Start(ctx context.Context, r ports.StartRequest) (ports.Pro
 	go func() {
 		_ = cmd.Wait()
 		run.once.Do(func() { close(run.done) })
+		// Delete only if this exact run still owns the identity. This prevents a
+		// natural exit from erasing a later process after PID reuse.
+		s.mu.Lock()
+		if s.procs[id] == run {
+			delete(s.procs, id)
+		}
+		s.mu.Unlock()
 		if c, ok := s.logs.(closer); ok {
 			_ = c.Close(r.LinkID)
 		}

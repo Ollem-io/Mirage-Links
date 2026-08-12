@@ -113,3 +113,88 @@ func TestForceKillGroupAndInputFailures(t *testing.T) {
 	}
 	_ = os.RemoveAll(dir)
 }
+
+func TestNaturalExitForgetsIdentityAndAllocatedHandoff(t *testing.T) {
+	s := NewSupervisor(nil)
+	dir := t.TempDir()
+	id, e := s.Start(context.Background(), ports.StartRequest{Folder: dir, Command: "exit 0"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		alive, e := s.Alive(context.Background(), id)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if !alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("natural exit ownership not removed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	a := NewAllocator()
+	id, p, e := s.StartAllocated(context.Background(), a, ports.StartRequest{Folder: dir, Command: "sleep 1"}, 2)
+	if e != nil || p.Number == 0 {
+		t.Fatal(id, p, e)
+	}
+	if e = s.Stop(context.Background(), id, time.Second); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestStartAllocatedCollisionRetry(t *testing.T) {
+	// A pre-bound requested port makes direct Start fail; StartAllocated chooses a
+	// fresh port rather than reusing the collision.
+	l, e := net.Listen("tcp", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Close()
+	bad := l.Addr().(*net.TCPAddr).Port
+	s := NewSupervisor(nil)
+	dir := t.TempDir()
+	id, p, e := s.StartAllocated(context.Background(), NewAllocator(), ports.StartRequest{Folder: dir, Command: "true"}, 2)
+	if e != nil || p.Number == bad {
+		t.Fatal(id, p, e)
+	}
+}
+
+func TestStopCancellationAndHandoffFailure(t *testing.T) {
+	s := NewSupervisor(nil)
+	dir := t.TempDir()
+	id, e := s.Start(context.Background(), ports.StartRequest{Folder: dir, Command: "sleep 1"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx, c := context.WithCancel(context.Background())
+	c()
+	if e := s.Stop(ctx, id, time.Second); e == nil {
+		t.Fatal("cancel stop")
+	}
+	if e := s.Stop(context.Background(), id, time.Second); e != nil {
+		t.Fatal(e)
+	}
+	ctx, c = context.WithCancel(context.Background())
+	c()
+	if _, _, e := s.StartAllocated(ctx, NewAllocator(), ports.StartRequest{Folder: dir, Command: "true"}, 0); e == nil {
+		t.Fatal("handoff cancel")
+	}
+}
+
+func TestStopUnknownNegativeGraceAndAlreadyExited(t *testing.T) {
+	s := NewSupervisor(nil)
+	if e := s.Stop(context.Background(), ports.ProcessIdentity{Value: "unknown"}, time.Millisecond); e != nil {
+		t.Fatal(e)
+	}
+	dir := t.TempDir()
+	id, e := s.Start(context.Background(), ports.StartRequest{Folder: dir, Command: "true"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if e := s.Stop(context.Background(), id, -time.Second); e != nil {
+		t.Fatal(e)
+	}
+}

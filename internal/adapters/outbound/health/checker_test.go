@@ -5,6 +5,7 @@ import (
 	"github.com/primeintellect/mirage/internal/domain"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -67,5 +68,66 @@ func TestCheckUntil(t *testing.T) {
 	cancel()
 	if New(time.Second).CheckUntil(ctx, hc(t, "GET", srv.URL), time.Second, time.Millisecond) == nil {
 		t.Fatal("cancel accepted")
+	}
+}
+
+func TestInjectedClientCannotPermitPublicRedirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "http://example.com/", 302) }))
+	defer srv.Close()
+	c := &Checker{Client: &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}}
+	if c.Check(context.Background(), hc(t, "GET", srv.URL)) == nil {
+		t.Fatal("custom redirect policy escaped")
+	}
+}
+
+func TestConstructorAndMalformedAndSuccessUntil(t *testing.T) {
+	if New(0).Client.Timeout != 2*time.Second {
+		t.Fatal("default timeout")
+	}
+	// Constructed values are reparsed, so unsupported method and malformed URL cannot bypass domain validation.
+	if New(time.Second).Check(context.Background(), domain.HealthCheck{Method: "PUT", URL: "http://127.0.0.1/"}) == nil {
+		t.Fatal("method")
+	}
+	if New(time.Second).Check(context.Background(), domain.HealthCheck{Method: domain.HealthGET, URL: "%%%"}) == nil {
+		t.Fatal("url")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer srv.Close()
+	if e := New(time.Second).CheckUntil(context.Background(), hc(t, "GET", srv.URL), time.Second, time.Millisecond); e != nil {
+		t.Fatal(e)
+	}
+}
+
+func TestNilClientAndCanceledProbe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { time.Sleep(time.Second) }))
+	defer srv.Close()
+	c := &Checker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if c.Check(ctx, hc(t, "GET", srv.URL)) == nil {
+		t.Fatal("canceled request accepted")
+	}
+}
+func TestLoopbackForms(t *testing.T) {
+	for _, raw := range []string{"http://localhost/", "http://127.0.0.1/", "http://[::1]/", "http://127.0.0.2/", "http://0.0.0.0/"} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := raw != "http://0.0.0.0/"
+		if loopback(u) != want {
+			t.Fatal(raw)
+		}
+	}
+}
+
+func TestAdditionalClassifications(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) }))
+	defer srv.Close()
+	if New(time.Second).Check(context.Background(), hc(t, "GET", srv.URL)) == nil {
+		t.Fatal("status")
+	}
+	if New(time.Second).Check(context.Background(), domain.HealthCheck{Method: domain.HealthGET, URL: "http://127.0.0.1:bad/"}) == nil {
+		t.Fatal("bad authority")
 	}
 }

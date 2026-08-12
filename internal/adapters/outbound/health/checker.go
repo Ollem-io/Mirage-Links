@@ -51,11 +51,20 @@ func (c *Checker) Check(ctx context.Context, h domain.HealthCheck) error { // Re
 	if client == nil {
 		client = New(2 * time.Second).Client
 	}
+	// Always override injected client redirect behavior: an injected transport
+	// may be useful in tests, but it may not weaken the loopback boundary.
+	copyClient := *client
+	copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !loopback(req.URL) {
+			return fmt.Errorf("health redirect leaves loopback")
+		}
+		return nil
+	}
 	req, err := http.NewRequestWithContext(ctx, string(parsed.Method), parsed.URL, nil)
 	if err != nil {
 		return fmt.Errorf("health request: %w", err)
 	}
-	resp, err := client.Do(req)
+	resp, err := copyClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("health probe: %w", err)
 	}
