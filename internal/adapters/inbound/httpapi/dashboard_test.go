@@ -299,3 +299,54 @@ func TestDashboardAnonymousLoginSessionAndTrustedSSL(t *testing.T) {
 		t.Fatalf("invalid %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestAdminDashboardSessionAndScopedControls(t *testing.T) {
+	raw, _ := domain.NewAdminToken()
+	h := raw.Hash()
+	f := &adminFake{fake: fixture(), hash: &h}
+	a := New(f, Config{})
+	a.SetReady(true)
+	srv := a.Handler()
+	r := httptest.NewRequest("POST", "/dashboard/session", strings.NewReader("token="+raw.Reveal()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	if w.Code != 303 {
+		t.Fatal(w.Code)
+	}
+	var cookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "mirage_dashboard_admin" {
+			cookie = c
+		}
+	}
+	if cookie == nil || cookie.MaxAge != 3600 || !cookie.HttpOnly {
+		t.Fatal("cookie")
+	}
+	get := func(path string) *httptest.ResponseRecorder {
+		q := httptest.NewRequest("GET", path, nil)
+		q.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, q)
+		return w
+	}
+	if w := get("/dashboard/admin"); w.Code != 200 || !strings.Contains(w.Body.String(), "Active spaces") {
+		t.Fatal(w.Code)
+	}
+	if w := get("/dashboard/admin/spaces/calm"); w.Code != 200 || !strings.Contains(w.Body.String(), "Force delete space") {
+		t.Fatal(w.Code)
+	}
+}
+func TestDashboardSessionRejectsCrossOrigin(t *testing.T) {
+	f := fixture()
+	a := New(f, Config{})
+	a.SetReady(true)
+	r := httptest.NewRequest("POST", "/dashboard/session", strings.NewReader("token=mir_x"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Origin", "https://evil.test")
+	w := httptest.NewRecorder()
+	a.Handler().ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "Unauthorized") {
+		t.Fatal(w.Code)
+	}
+}
