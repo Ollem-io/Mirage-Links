@@ -38,16 +38,13 @@ description = "Run the Go test suite with the race detector"
 run = "go test -race ./..."
 
 [tasks.coverage]
-description = "Report repository coverage and enforce 85% for meaningful bootstrap code"
+description = "Report and enforce aggregate repository Go statement coverage"
 run = '''set -eu
-# Print repository-wide coverage as required. Packages containing only package
-# documentation have no statements; cmd/mirage has one untestable os.Exit
-# boundary statement and is covered by smoke. Enforce the injectable logic.
-go test -cover ./...
-output=$(go test -cover ./internal/adapters/inbound/cli ./internal/composition)
-printf '%s\n' "$output"
-coverage=$(printf '%s\n' "$output" | sed -n 's/.*coverage: \([0-9.]*\)%.*/\1/p' | awk 'BEGIN { min=101; seen=0 } { if ($1 < min) min=$1; seen=1 } END { if (!seen) exit 1; printf "%.2f", min }')
-awk -v coverage="$coverage" 'BEGIN { if (coverage < 85) { printf "meaningful-code coverage %.2f%% is below required 85%%\n", coverage > "/dev/stderr"; exit 1 } }'
+# One aggregate profile is measured across the complete test invocation.
+go test -coverprofile=coverage.out ./...
+coverage=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
+printf 'aggregate statement coverage: %s%%\n' "$coverage"
+awk -v coverage="$coverage" 'BEGIN { if (coverage < 85) { printf "aggregate coverage %.2f%% is below required 85%%\n", coverage > "/dev/stderr"; exit 1 } }'
 '''
 
 [tasks.build]
@@ -61,3 +58,7 @@ run = "./scripts/smoke.sh"
 [tasks.check]
 description = "Run formatting, tests, coverage, build, and black-box smoke checks"
 depends = ["fmt-check", "lint", "test", "coverage", "build", "smoke"]
+
+[tasks.test-domain]
+description = "Run domain contract tests"
+run = "go test ./internal/domain"
