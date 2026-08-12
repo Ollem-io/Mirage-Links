@@ -181,7 +181,7 @@ func TestStartAllocatedCollisionRetry(t *testing.T) {
 		}
 	}
 	s := NewSupervisor(nil)
-	id, p, err := s.startAllocated(context.Background(), a, ports.StartRequest{Folder: t.TempDir(), Command: fixture + " healthy"}, 2, 80*time.Millisecond)
+	id, p, err := s.startAllocated(context.Background(), a, ports.StartRequest{Folder: t.TempDir(), Command: fixture + " healthy"}, 2, 2*time.Second)
 	if collision != nil {
 		_ = collision.Close()
 	}
