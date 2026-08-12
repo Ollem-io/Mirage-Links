@@ -93,4 +93,4 @@ admin:
 ```
 
 Create credentials offline (both paths are deliberately required):
-`mirage admin init --token-file PATH --hash-file PATH`. The token file is 0600 and hash file is 0640; creation is exclusive and raw credentials are never printed. Use `--admin-token`, `MIRAGE_ADMIN_TOKEN`, or `./.mirage_admin_token` for administrative API/CLI operations. Without `admin.token_hash_file`, Mirage retains legacy unauthenticated global space administration for backwards compatibility; operators should configure it in production.
+`mirage admin init --token-file PATH --hash-file PATH`. The token file is 0600 and hash file is 0640; creation is exclusive and raw credentials are never printed. Use `--admin-token`, `MIRAGE_ADMIN_TOKEN`, or `./.mirage_admin_token` for administrative API/CLI operations. Administrative service methods fail closed without `admin.token_hash_file`. Legacy unscoped compatibility endpoints are separate; do not expose them in production. See `docs/admin-token.md` for setup, retrieval, rotation, rollback, and incident guidance.

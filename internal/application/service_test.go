@@ -400,3 +400,57 @@ func TestAdminAuthorizationAndGlobalMethods(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestAdminLinkMethodsAreGatedAndAliasScoped(t *testing.T) {
+	s, f, tok := setup(t)
+	ctx := context.Background()
+	if s.AdminConfigured() {
+		t.Fatal("unexpected configured admin")
+	}
+	if _, err := s.AdminListSpaces(ctx, ""); !domain.IsKind(err, domain.Unauthorized) {
+		t.Fatalf("unconfigured admin accepted: %v", err)
+	}
+	admin, _ := domain.NewAdminToken()
+	h := admin.Hash()
+	s.AdminTokenHash = &h
+	if !s.AdminConfigured() {
+		t.Fatal("admin not configured")
+	}
+	if _, err := s.CreateLink(ctx, input(tok)); err != nil {
+		t.Fatal(err)
+	}
+	if links, err := s.AdminListLinks(ctx, admin, "calm-fox"); err != nil || len(links) != 1 {
+		t.Fatalf("links=%v err=%v", links, err)
+	}
+	if logs, err := s.AdminLogsFor(ctx, admin, "calm-fox", "api", 10); err != nil || len(logs) != 1 {
+		t.Fatalf("logs=%v err=%v", logs, err)
+	}
+	if _, err := s.AdminListLinks(ctx, admin, "other"); !domain.IsKind(err, domain.NotFound) {
+		t.Fatalf("cross-scope lookup: %v", err)
+	}
+	bad := domain.AdminToken("mir_admin_invalid")
+	if _, err := s.AdminLogsFor(ctx, bad, "calm-fox", "api", 10); !domain.IsKind(err, domain.Unauthorized) {
+		t.Fatalf("bad logs credential: %v", err)
+	}
+	if _, err := s.AdminRestartLink(ctx, admin, "calm-fox", "api", ""); !domain.IsKind(err, domain.Validation) {
+		t.Fatalf("empty restart reason: %v", err)
+	}
+	if _, err := s.AdminRestartLink(ctx, bad, "calm-fox", "api", "ticket"); !domain.IsKind(err, domain.Unauthorized) {
+		t.Fatalf("bad restart credential: %v", err)
+	}
+	if _, err := s.AdminRestartLink(ctx, admin, "calm-fox", "api", "ticket"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AdminDeleteLink(ctx, admin, "calm-fox", "api", ""); !domain.IsKind(err, domain.Validation) {
+		t.Fatalf("empty delete reason: %v", err)
+	}
+	if err := s.AdminDeleteLink(ctx, bad, "calm-fox", "api", "ticket"); !domain.IsKind(err, domain.Unauthorized) {
+		t.Fatalf("bad delete credential: %v", err)
+	}
+	if err := s.AdminDeleteLink(ctx, admin, "calm-fox", "api", "ticket"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.audit) != 2 || f.audit[0].Action != "restart_link" || f.audit[1].Action != "delete_link" {
+		t.Fatalf("audit=%+v", f.audit)
+	}
+}

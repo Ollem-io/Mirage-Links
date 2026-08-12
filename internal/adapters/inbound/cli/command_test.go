@@ -93,3 +93,72 @@ func TestLoadConfigExternalAdvertisement(t *testing.T) {
 		t.Fatal("accepted port")
 	}
 }
+
+func TestInitAdminTokenAtomicModesNoOverwrite(t *testing.T) {
+	d := t.TempDir()
+	tokenPath, hashPath := filepath.Join(d, "admin.token"), filepath.Join(d, "admin.sha256")
+	if err := initAdminToken(tokenPath, hashPath); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := os.ReadFile(hashPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(hash), "mir_admin_") || !strings.HasPrefix(string(tok), "mir_admin_") {
+		t.Fatal("credential leaked or malformed")
+	}
+	if len(strings.TrimSpace(string(hash))) != 64 {
+		t.Fatalf("hash=%q", hash)
+	}
+	for p, want := range map[string]os.FileMode{tokenPath: 0600, hashPath: 0640} {
+		fi, err := os.Stat(p)
+		if err != nil || fi.Mode().Perm() != want {
+			t.Fatalf("%s mode=%v err=%v", p, fi.Mode().Perm(), err)
+		}
+	}
+	before := append([]byte(nil), tok...)
+	if err := initAdminToken(tokenPath, filepath.Join(d, "other.sha256")); err == nil {
+		t.Fatal("overwrote existing token")
+	}
+	after, _ := os.ReadFile(tokenPath)
+	if !bytes.Equal(before, after) {
+		t.Fatal("token changed")
+	}
+}
+
+func TestInitAdminTokenRollsBackTokenWhenHashCannotBeCreated(t *testing.T) {
+	d := t.TempDir()
+	tokenPath := filepath.Join(d, "admin.token")
+	if err := initAdminToken(tokenPath, filepath.Join(d, "missing", "admin.sha256")); err == nil {
+		t.Fatal("expected error")
+	}
+	if _, err := os.Lstat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("token not rolled back: %v", err)
+	}
+}
+
+func TestInitAdminTokenRejectsExistingAndNonRegularPaths(t *testing.T) {
+	d := t.TempDir()
+	target := filepath.Join(d, "target")
+	if err := os.WriteFile(target, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(d, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := initAdminToken(link, filepath.Join(d, "hash")); err == nil {
+		t.Fatal("accepted symlink")
+	}
+	dir := filepath.Join(d, "dir")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := initAdminToken(dir, filepath.Join(d, "hash")); err == nil {
+		t.Fatal("accepted existing directory")
+	}
+}

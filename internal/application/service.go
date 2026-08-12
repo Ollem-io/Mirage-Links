@@ -116,9 +116,12 @@ func (s *Service) ListSpaces(ctx context.Context) ([]domain.Space, error) {
 // AdminConfigured reports whether installation-wide administration is enabled.
 func (s *Service) AdminConfigured() bool { return s.AdminTokenHash != nil }
 func (s *Service) AuthorizeAdmin(_ context.Context, token domain.AdminToken) error {
+	// Administrative methods are privileged boundaries. A Service assembled
+	// without an installation credential must fail closed; legacy unscoped
+	// endpoints use their non-admin methods explicitly.
 	if s.AdminTokenHash == nil {
-		return nil
-	} // documented legacy compatibility mode
+		return domain.NewUnauthorized("administration is not configured")
+	}
 	if !s.AdminTokenHash.Verify(token) {
 		return domain.NewUnauthorized("invalid admin bearer token")
 	}

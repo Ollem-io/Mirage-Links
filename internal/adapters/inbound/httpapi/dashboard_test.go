@@ -350,3 +350,80 @@ func TestDashboardSessionRejectsCrossOrigin(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestAdminDashboardMutationRoutes(t *testing.T) {
+	raw, _ := domain.NewAdminToken()
+	hash := raw.Hash()
+	f := &adminFake{fake: fixture(), hash: &hash}
+	a := New(f, Config{})
+	a.SetReady(true)
+	h := a.Handler()
+	login := httptest.NewRequest(http.MethodPost, "/dashboard/session", strings.NewReader("token="+raw.Reveal()))
+	login.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	lw := httptest.NewRecorder()
+	h.ServeHTTP(lw, login)
+	var session, csrf *http.Cookie
+	for _, c := range lw.Result().Cookies() {
+		if c.Name == "mirage_dashboard_admin" {
+			session = c
+		}
+		if c.Name == "mirage_dashboard_csrf" {
+			csrf = c
+		}
+	}
+	if session == nil || csrf == nil {
+		t.Fatal("admin cookies absent")
+	}
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Host = "example.com"
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("Origin", "http://example.com")
+		r.Header.Set("X-Mirage-CSRF", csrf.Value)
+		r.AddCookie(session)
+		r.AddCookie(csrf)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("POST", "/dashboard/admin/spaces", "alias=new&ttl=1h"); w.Code != 200 || !strings.Contains(w.Body.String(), "shown once") {
+		t.Fatalf("create %d %s", w.Code, w.Body.String())
+	}
+	if w := call("GET", "/dashboard/admin/spaces/calm/links/api/logs", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "admin log") {
+		t.Fatalf("logs %d %s", w.Code, w.Body.String())
+	}
+	for _, path := range []string{"/dashboard/admin/spaces/calm/links/api/restart", "/dashboard/admin/spaces/calm/links/api/delete"} {
+		if w := call("POST", path, "reason=ticket"); w.Code != 303 {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+	}
+	if w := call("POST", "/dashboard/admin/spaces/calm/delete", "reason=ticket"); w.Code != 303 {
+		t.Fatalf("delete space %d %s", w.Code, w.Body.String())
+	}
+	if f.creates != 1 || f.deletes != 1 || f.changes != 2 {
+		t.Fatalf("creates=%d deletes=%d changes=%d", f.creates, f.deletes, f.changes)
+	}
+	if w := call("POST", "/dashboard/admin/spaces", "ttl=bad"); w.Code != 400 {
+		t.Fatalf("bad ttl=%d", w.Code)
+	}
+}
+
+func TestAdminDashboardLogoutClearsCookies(t *testing.T) {
+	a := New(fixture(), Config{})
+	a.SetReady(true)
+	r := httptest.NewRequest(http.MethodPost, "/dashboard/logout", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	a.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status=%d", w.Code)
+	}
+	if len(w.Result().Cookies()) < 3 {
+		t.Fatalf("cookies=%v", w.Result().Cookies())
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.MaxAge != -1 {
+			t.Fatalf("cookie not cleared: %+v", c)
+		}
+	}
+}

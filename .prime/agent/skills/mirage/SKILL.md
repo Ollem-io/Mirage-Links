@@ -196,4 +196,31 @@ dashboard_ssl: true # only when a trusted TLS terminator fronts the private dash
 
 ## Installation-wide admin tokens
 
-Initialize on the Mirage host with explicit secure paths: `mirage admin init --token-file PATH --hash-file PATH`. Put only `admin.token_hash_file` in config. The service account must be able to read the hash file, while the raw token file remains owned/mode 0600 by the operator. Do not log, paste into JSON, or commit raw admin tokens. Admin is fail-closed unless a valid hash file is configured.
+Initialize on the Mirage host using explicit, new secure paths:
+
+```sh
+mirage admin init \
+  --token-file /secure/mirage/admin.token \
+  --hash-file /etc/mirage/admin-token.sha256
+```
+
+Put only the hash path in configuration:
+
+```yaml
+admin:
+  token_hash_file: /etc/mirage/admin-token.sha256
+```
+
+The operator retains the mode-0600 raw token file; the service account needs
+read access only to the mode-0640 hash. Initialization is exclusive and rolls
+back the raw token if hash creation fails. Never print, log, paste into JSON, or
+commit the raw token. Retrieve it only from its protected token file; it cannot
+be recovered from the hash. Use `--admin-token`, `MIRAGE_ADMIN_TOKEN`, or a
+mode-0600 `./.mirage_admin_token`.
+
+To rotate, create a new pair under new filenames, point the config at the new
+hash, restart Mirage, verify the new token, then securely remove the old pair.
+Keep the old pair until verification so rollback is possible. Mirage rejects
+malformed, symlinked, non-regular, or writable hash files at startup, and admin
+service methods fail closed when no valid hash is loaded. Dashboard admin
+sessions last one hour; rotating and restarting invalidates old-token sessions.
