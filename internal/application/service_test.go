@@ -284,7 +284,7 @@ func TestLifecycleOrderingAndCompensation(t *testing.T) {
 				if e != nil || r.Link.Status != domain.StatusActive {
 					t.Fatalf("%v %#v", e, r)
 				}
-				if fmt.Sprint(f.events) != fmt.Sprint([]string{"reserve", "start", "health", "add"}) {
+				if fmt.Sprint(f.events) != fmt.Sprint([]string{"reserve", "release", "start", "health", "add"}) {
 					t.Fatal(f.events)
 				}
 				if e = s.DeleteLink(context.Background(), LinkMutationInput{Alias: "calm-fox", Token: tok, Name: "api"}); e != nil {

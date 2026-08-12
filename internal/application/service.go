@@ -306,6 +306,11 @@ func (s *Service) start(ctx context.Context, sp domain.Space, l domain.Link) (Cr
 	if e = s.Repo.SaveLink(ctx, l); e != nil {
 		return s.failStart(ctx, l, p, e)
 	}
+	// Release the reservation immediately before process start so the child can bind it.
+	// The allocator's Release is idempotent, so later cleanup may safely repeat it.
+	if e = s.Ports.Release(ctx, p); e != nil {
+		return s.failStart(ctx, l, p, e)
+	}
 	id, e := s.Processes.Start(ctx, ports.StartRequest{LinkID: l.ID, Command: l.Command, Folder: l.Folder, Port: p, Environment: map[string]string{"PORT": fmt.Sprint(p.Number)}})
 	if e != nil {
 		return s.failStart(ctx, l, p, e)
