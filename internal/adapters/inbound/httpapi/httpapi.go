@@ -399,11 +399,14 @@ func (a *API) space(w http.ResponseWriter, r *http.Request, alias string) {
 					apiErr(w, ae)
 					return
 				}
-				if ad != nil {
-					e = ad.AdminDeleteSpace(r.Context(), at, application.DeleteSpaceInput{Alias: alias, Force: true, Reason: in.Reason})
-				} else {
-					e = a.service.DeleteSpace(r.Context(), application.DeleteSpaceInput{Alias: alias, Force: true, Reason: in.Reason})
+				// Force deletion is always privileged. Unlike legacy global query and
+				// create compatibility paths, it must never fall back to the ordinary
+				// service when installation administration is unavailable.
+				if ad == nil {
+					apiErr(w, domain.NewUnauthorized("installation administration is not available"))
+					return
 				}
+				e = ad.AdminDeleteSpace(r.Context(), at, application.DeleteSpaceInput{Alias: alias, Force: true, Reason: in.Reason})
 			} else {
 				e = a.service.DeleteSpace(r.Context(), application.DeleteSpaceInput{Alias: alias, Token: tok})
 			}

@@ -237,7 +237,7 @@ func TestRemainingRoutes(t *testing.T) {
 		auth    bool
 		want    int
 	}{
-		{"DELETE", "/api/v1/spaces/calm", "", true, 204}, {"DELETE", "/api/v1/spaces/calm", `{"force":true,"reason":"ops"}`, false, 204}, {"POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"bad"}`, true, 400}, {"POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"GET http://127.0.0.1:8/","grace":"x"}`, true, 400}, {"POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"GET http://127.0.0.1:8/","ttl":"x"}`, true, 400}, {"GET", "/api/v1/links/api/logs?tail=wat", "", true, 400}, {"DELETE", "/api/v1/links/api", "", false, 401},
+		{"DELETE", "/api/v1/spaces/calm", "", true, 204}, {"DELETE", "/api/v1/spaces/calm", `{"force":true,"reason":"ops"}`, false, 401}, {"POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"bad"}`, true, 400}, {"POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"GET http://127.0.0.1:8/","grace":"x"}`, true, 400}, {"POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"GET http://127.0.0.1:8/","ttl":"x"}`, true, 400}, {"GET", "/api/v1/links/api/logs?tail=wat", "", true, 400}, {"DELETE", "/api/v1/links/api", "", false, 401},
 	} {
 		if w := request(h, x.m, x.p, x.b, x.auth); w.Code != x.want {
 			t.Errorf("%s %s: %d", x.m, x.p, w.Code)
@@ -488,5 +488,21 @@ func TestAdminAliasRoutes(t *testing.T) {
 	}
 	if x := call("GET", "/api/v1/admin/spaces/calm/links", "", "mir_bad"); x != 401 {
 		t.Fatal(x)
+	}
+}
+
+func TestForceDeleteFailsClosedWithoutAdminService(t *testing.T) {
+	f := fixture() // fake deliberately implements only the ordinary service interface.
+	a := New(f, Config{})
+	a.SetReady(true)
+	r := httptest.NewRequest(http.MethodDelete, "/api/v1/spaces/calm", strings.NewReader(`{"force":true,"reason":"operator request"}`))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(f.deleted) != 0 {
+		t.Fatalf("force delete reached ordinary service: %#v", f.deleted)
 	}
 }
