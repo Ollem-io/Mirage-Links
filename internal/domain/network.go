@@ -69,7 +69,8 @@ func ParseHealthCheck(s string) (HealthCheck, error) {
 	if h.Method != HealthGET && h.Method != HealthHEAD && h.Method != HealthPOST {
 		return HealthCheck{}, NewValidation("health_check", "unsupported method")
 	}
-	u, e := url.ParseRequestURI(h.URL)
+	validationURL := strings.ReplaceAll(h.URL, "{port}", "1")
+	u, e := url.ParseRequestURI(validationURL)
 	if strings.Contains(h.URL, "#") || e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return HealthCheck{}, NewValidation("health_check", "must be an absolute HTTP URL")
 	}

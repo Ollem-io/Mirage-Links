@@ -225,3 +225,13 @@ func TestInternalErrorKind(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestHealthCheckAllowsPortPlaceholder(t *testing.T) {
+	h, err := ParseHealthCheck("GET http://127.0.0.1:{port}/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.URL != "http://127.0.0.1:{port}/healthz" {
+		t.Fatalf("URL = %q", h.URL)
+	}
+}
