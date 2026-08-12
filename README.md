@@ -1,10 +1,9 @@
 # Mirage
 
 Mirage is a single-node manager for temporary local application environments.
-This repository currently contains the **MIR-01 bootstrap only**: a pinned Go
-module, build tooling, and a deliberately small executable skeleton. Space,
-link, HTTP, storage, Caddy, and process behavior are implemented in later
-milestones.
+Mirage v1 provides a CLI, private HTTP API and HTMX dashboard backed by
+embedded libSQL. It supervises temporary host processes, health-gates public
+Caddy routes, enforces TTLs, and reconciles state after crashes.
 
 ## Prerequisites
 
@@ -57,8 +56,11 @@ all injectable bootstrap logic participates in Go coverage. Generated code is
 not checked in and no bootstrap behavior is excluded. `scripts/smoke.sh` provides the clean-temporary-directory
 black-box binary check used by `mise run smoke`.
 
-## Operations
-See [the operator runbook](docs/runbook.md) for startup, recovery, shutdown, release checksum and incident procedures.
+## Installation and operations
+
+See [the installation guide](docs/setup.md) for the recommended systemd setup,
+DNS, upgrades, and verification. See [the operator runbook](docs/runbook.md) for
+startup, recovery, shutdown, release checksum, and incident procedures.
 
 ## Contributing
 
