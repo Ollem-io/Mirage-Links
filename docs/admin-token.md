@@ -41,6 +41,12 @@ from the hash:
 sudo cat /secure/mirage/admin.token
 export MIRAGE_ADMIN_TOKEN="$(sudo cat /secure/mirage/admin.token)"
 mirage space list
+
+# Alias-bound administration of an existing space's links:
+mirage admin links list calm-fox
+mirage admin links logs calm-fox api --tail 100
+mirage admin links restart calm-fox api --reason 'ticket OPS-42'
+mirage admin links delete calm-fox api --reason 'ticket OPS-42'
 ```
 
 For a single invocation, prefer `--admin-token`; for local operator workflows,

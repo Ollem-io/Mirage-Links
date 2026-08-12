@@ -330,7 +330,7 @@ func TestAdminDashboardSessionAndScopedControls(t *testing.T) {
 		srv.ServeHTTP(w, q)
 		return w
 	}
-	if w := get("/dashboard/admin"); w.Code != 200 || !strings.Contains(w.Body.String(), "Active spaces") {
+	if w := get("/dashboard/admin"); w.Code != 200 || !strings.Contains(w.Body.String(), "Active spaces") || !strings.Contains(w.Body.String(), "hx-post='/dashboard/admin/spaces'") || !strings.Contains(w.Body.String(), "dashboard.js") {
 		t.Fatal(w.Code)
 	}
 	if w := get("/dashboard/admin/spaces/calm"); w.Code != 200 || !strings.Contains(w.Body.String(), "Force delete space") {
@@ -415,8 +415,8 @@ func TestAdminDashboardLogoutClearsCookies(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer token")
 	w := httptest.NewRecorder()
 	a.Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("status=%d", w.Code)
+	if w.Code != http.StatusSeeOther || w.Header().Get("HX-Redirect") != "/dashboard" {
+		t.Fatalf("status=%d hx=%q", w.Code, w.Header().Get("HX-Redirect"))
 	}
 	if len(w.Result().Cookies()) < 3 {
 		t.Fatalf("cookies=%v", w.Result().Cookies())
@@ -425,5 +425,49 @@ func TestAdminDashboardLogoutClearsCookies(t *testing.T) {
 		if c.MaxAge != -1 {
 			t.Fatalf("cookie not cleared: %+v", c)
 		}
+	}
+}
+
+func TestAdminHTMXCreateAndLogoutRequireCSRF(t *testing.T) {
+	raw, _ := domain.NewAdminToken()
+	hash := raw.Hash()
+	f := &adminFake{fake: fixture(), hash: &hash}
+	a := New(f, Config{})
+	a.SetReady(true)
+	h := a.Handler()
+	login := httptest.NewRequest(http.MethodPost, "/dashboard/session", strings.NewReader("token="+raw.Reveal()))
+	login.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	lw := httptest.NewRecorder()
+	h.ServeHTTP(lw, login)
+	var session, csrf *http.Cookie
+	for _, c := range lw.Result().Cookies() {
+		if c.Name == "mirage_dashboard_admin" {
+			session = c
+		}
+		if c.Name == "mirage_dashboard_csrf" {
+			csrf = c
+		}
+	}
+	request := func(path, nonce string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader("alias=created&ttl=1h"))
+		r.Host = "example.com"
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("HX-Request", "true")
+		r.Header.Set("Origin", "http://example.com")
+		r.Header.Set("X-Mirage-CSRF", nonce)
+		r.AddCookie(session)
+		r.AddCookie(csrf)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := request("/dashboard/admin/spaces", ""); w.Code != http.StatusNotFound || f.creates != 0 {
+		t.Fatalf("missing csrf status=%d creates=%d", w.Code, f.creates)
+	}
+	if w := request("/dashboard/admin/spaces", csrf.Value); w.Code != http.StatusOK || f.creates != 1 {
+		t.Fatalf("create status=%d creates=%d body=%s", w.Code, f.creates, w.Body.String())
+	}
+	if w := request("/dashboard/logout", csrf.Value); w.Code != http.StatusSeeOther || w.Header().Get("HX-Redirect") != "/dashboard" {
+		t.Fatalf("logout status=%d hx=%q", w.Code, w.Header().Get("HX-Redirect"))
 	}
 }

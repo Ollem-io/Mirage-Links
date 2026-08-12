@@ -793,6 +793,64 @@ func (c Command) cobraTree() *cobra.Command {
 	init.Flags().StringVar(&adminTokenFile, "token-file", "", "new token file (mode 0600)")
 	init.Flags().StringVar(&adminHashFile, "hash-file", "", "new SHA-256 hash file (mode 0640)")
 	admin.AddCommand(init)
+
+	adminLinks := &cobra.Command{Use: "links", Short: "manage links in any space", Args: cobra.NoArgs}
+	adminCall := func(method, alias, name, action, reason string, tail int) error {
+		_, base, err := resolve()
+		if err != nil {
+			return failResolve(err)
+		}
+		at, err := c.adminToken("")
+		if err != nil {
+			return failResolve(err)
+		}
+		if strings.TrimSpace(at) == "" {
+			return failResolve(fmt.Errorf("admin token required: provide --admin-token, MIRAGE_ADMIN_TOKEN, or ./.mirage_admin_token"))
+		}
+		path := "/api/v1/admin/spaces/" + url.PathEscape(alias) + "/links"
+		if name != "" {
+			path += "/" + url.PathEscape(name)
+		}
+		if action != "" {
+			path += "/" + action
+		}
+		if tail > 0 && action == "logs" {
+			path += "?tail=" + strconv.Itoa(tail)
+		}
+		var body any
+		if reason != "" {
+			body = map[string]any{"reason": reason}
+		}
+		return commandResult(c.request(base, method, path, at, body, jsonOut, func(v map[string]any) {
+			if action == "logs" {
+				c.printRows(v, "logs", []string{"at", "stream", "text"})
+			} else if action == "" {
+				c.printRows(v, "links", []string{"name", "url", "status", "expires_at"})
+			} else {
+				fmt.Fprintf(c.stdout, "%s link %s in %s\n", strings.Title(action), name, alias)
+			}
+		}))
+	}
+	adminList := &cobra.Command{Use: "list <alias>", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error { return adminCall(http.MethodGet, a[0], "", "", "", 0) }}
+	var adminTail int
+	adminLogs := &cobra.Command{Use: "logs <alias> <name>", Args: cobra.ExactArgs(2), RunE: func(_ *cobra.Command, a []string) error {
+		return adminCall(http.MethodGet, a[0], a[1], "logs", "", adminTail)
+	}}
+	adminLogs.Flags().IntVar(&adminTail, "tail", 100, "lines to show")
+	var adminReason string
+	adminMutation := func(action, method string) *cobra.Command {
+		cmd := &cobra.Command{Use: action + " <alias> <name>", Args: cobra.ExactArgs(2), RunE: func(_ *cobra.Command, a []string) error {
+			if strings.TrimSpace(adminReason) == "" {
+				return fmt.Errorf("--reason is required")
+			}
+			return adminCall(method, a[0], a[1], action, adminReason, 0)
+		}}
+		cmd.Flags().StringVar(&adminReason, "reason", "", "required administrative audit reason")
+		return cmd
+	}
+	adminLinks.AddCommand(adminList, adminLogs, adminMutation("restart", http.MethodPost), adminMutation("delete", http.MethodDelete))
+	admin.AddCommand(adminLinks)
+
 	root.AddCommand(start, space, link, admin)
 	return root
 }

@@ -137,6 +137,7 @@ func dashboardLogout(w http.ResponseWriter, r *http.Request) {
 	for _, n := range []string{"mirage_dashboard_token", "mirage_dashboard_admin", "mirage_dashboard_csrf"} {
 		http.SetCookie(w, &http.Cookie{Name: n, Value: "", Path: "/dashboard", MaxAge: -1, HttpOnly: n != "mirage_dashboard_csrf", SameSite: http.SameSiteStrictMode})
 	}
+	w.Header().Set("HX-Redirect", "/dashboard")
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 
@@ -522,9 +523,9 @@ func (a *API) renderAdmin(w http.ResponseWriter, r *http.Request, ad adminServic
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	io.WriteString(w, "<!doctype html><html><body><h1>Mirage administration</h1><form method=post action=/dashboard/logout><button>Logout</button></form><h2>Create space</h2><form method=post action=/dashboard/admin/spaces><input name=ttl placeholder=TTL><input name=alias placeholder='optional alias'><button>Create</button></form><h2>Active spaces</h2><ul>")
+	io.WriteString(w, "<!doctype html><html><body><h1>Mirage administration</h1><form hx-post='/dashboard/logout'><button>Logout</button></form><h2>Create space</h2><form hx-post='/dashboard/admin/spaces' hx-target='#admin-result'><input name=ttl placeholder=TTL><input name=alias placeholder='optional alias'><button>Create</button></form><div id=admin-result></div><h2>Active spaces</h2><ul>")
 	for _, sp := range xs {
 		fmt.Fprintf(w, "<li><a href='/dashboard/admin/spaces/%s'>%s</a></li>", url.PathEscape(sp.Alias.String()), template.HTMLEscapeString(sp.Alias.String()))
 	}
-	io.WriteString(w, "</ul></body></html>")
+	io.WriteString(w, "</ul><script defer src='/dashboard/assets/dashboard.js'></script></body></html>")
 }

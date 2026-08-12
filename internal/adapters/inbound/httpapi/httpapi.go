@@ -614,7 +614,15 @@ func (a *API) adminLinksInner(w http.ResponseWriter, r *http.Request, seg []stri
 		return
 	}
 	if len(seg) == 6 && seg[5] == "logs" && r.Method == http.MethodGet {
-		x, e := ad.AdminLogsFor(r.Context(), t, alias, seg[4], 100)
+		tail := 100
+		if v := r.URL.Query().Get("tail"); v != "" {
+			tail, e = strconv.Atoi(v)
+			if e != nil || tail < 0 {
+				apiErr(w, domain.NewValidation("tail", "must be a non-negative integer"))
+				return
+			}
+		}
+		x, e := ad.AdminLogsFor(r.Context(), t, alias, seg[4], tail)
 		if e != nil {
 			apiErr(w, e)
 			return

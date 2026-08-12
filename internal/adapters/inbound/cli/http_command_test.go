@@ -95,3 +95,59 @@ func TestEqualsFlagsAndMalformedSuccessShape(t *testing.T) {
 		t.Fatalf("%d %s", got, er.String())
 	}
 }
+
+func TestAdminLinkCLICommands(t *testing.T) {
+	var calls []string
+	var bodies []string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		calls = append(calls, r.Method+" "+r.URL.String()+" "+r.Header.Get("Authorization"))
+		bodies = append(bodies, string(b))
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/logs"):
+			io.WriteString(w, `{"logs":[{"text":"hello"}]}`)
+		case strings.HasSuffix(r.URL.Path, "/restart"):
+			io.WriteString(w, `{"link":{"name":"api","status":"active"}}`)
+		default:
+			io.WriteString(w, `{"links":[{"name":"api","status":"active"}]}`)
+		}
+	}))
+	defer s.Close()
+	for _, args := range [][]string{
+		{"--server", s.URL, "--admin-token", "mir_admin_abcdefghijklmnopqrstuvwxyzABCDEFGH123456", "admin", "links", "list", "calm"},
+		{"--server", s.URL, "--admin-token", "mir_admin_abcdefghijklmnopqrstuvwxyzABCDEFGH123456", "admin", "links", "logs", "calm", "api", "--tail", "7"},
+		{"--server", s.URL, "--admin-token", "mir_admin_abcdefghijklmnopqrstuvwxyzABCDEFGH123456", "admin", "links", "restart", "calm", "api", "--reason", "ticket"},
+		{"--server", s.URL, "--admin-token", "mir_admin_abcdefghijklmnopqrstuvwxyzABCDEFGH123456", "admin", "links", "delete", "calm", "api", "--reason", "cleanup"},
+	} {
+		var out, er bytes.Buffer
+		if got := New(&out, &er, func() string { return "x" }).Execute(args); got != 0 {
+			t.Fatalf("%v: %d %s", args, got, er.String())
+		}
+	}
+	if len(calls) != 4 {
+		t.Fatalf("calls=%v", calls)
+	}
+	if calls[0] != "GET /api/v1/admin/spaces/calm/links Bearer mir_admin_abcdefghijklmnopqrstuvwxyzABCDEFGH123456" {
+		t.Fatal(calls[0])
+	}
+	if !strings.Contains(calls[1], "/logs?tail=7") || !strings.HasPrefix(calls[2], "POST ") || !strings.HasPrefix(calls[3], "DELETE ") {
+		t.Fatal(calls)
+	}
+	if !strings.Contains(bodies[2], `"reason":"ticket"`) || !strings.Contains(bodies[3], `"reason":"cleanup"`) {
+		t.Fatal(bodies)
+	}
+}
+
+func TestAdminLinkCLIRequiresCredentialAndReason(t *testing.T) {
+	var out, er bytes.Buffer
+	c := New(&out, &er, func() string { return "x" })
+	if got := c.Execute([]string{"admin", "links", "restart", "calm", "api"}); got == 0 || !strings.Contains(er.String(), "--reason is required") {
+		t.Fatalf("got=%d err=%s", got, er.String())
+	}
+	out.Reset()
+	er.Reset()
+	if got := c.Execute([]string{"admin", "links", "list", "calm"}); got == 0 || !strings.Contains(er.String(), "admin token required") {
+		t.Fatalf("got=%d err=%s", got, er.String())
+	}
+}

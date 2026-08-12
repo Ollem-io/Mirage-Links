@@ -216,7 +216,9 @@ read access only to the mode-0640 hash. Initialization is exclusive and rolls
 back the raw token if hash creation fails. Never print, log, paste into JSON, or
 commit the raw token. Retrieve it only from its protected token file; it cannot
 be recovered from the hash. Use `--admin-token`, `MIRAGE_ADMIN_TOKEN`, or a
-mode-0600 `./.mirage_admin_token`.
+mode-0600 `./.mirage_admin_token`. Manage existing links across spaces with
+`mirage admin links list <alias>`, `logs <alias> <name>`, and audited
+`restart|delete <alias> <name> --reason TEXT` commands.
 
 To rotate, create a new pair under new filenames, point the config at the new
 hash, restart Mirage, verify the new token, then securely remove the old pair.
