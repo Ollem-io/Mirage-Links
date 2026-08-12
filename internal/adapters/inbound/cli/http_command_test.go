@@ -77,3 +77,21 @@ func TestAPIError(t *testing.T) {
 		t.Fatal(e.String())
 	}
 }
+
+func TestEqualsFlagsAndMalformedSuccessShape(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"spaces":"not-an-array"}`)
+	}))
+	defer s.Close()
+	var out, er bytes.Buffer
+	c := New(&out, &er, func() string { return "x" })
+	if got := c.Execute([]string{"--server=" + s.URL, "--json", "space", "list"}); got != 0 {
+		t.Fatalf("%d %s", got, er.String())
+	}
+	out.Reset()
+	er.Reset()
+	if got := c.Execute([]string{"--server=" + s.URL, "--token=ok", "link", "list"}); got != 0 {
+		t.Fatalf("%d %s", got, er.String())
+	}
+}

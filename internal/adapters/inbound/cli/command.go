@@ -7,7 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+
+	"github.com/primeintellect/mirage/internal/domain"
+	"github.com/spf13/cobra"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,49 +51,60 @@ func (c Command) usageError(s string) int {
 	return 2
 }
 func (c Command) Execute(args []string) int {
+	// Cobra owns the command vocabulary and help metadata. Argument resolution
+	// remains injectable below so HTTP behavior can be tested without a process.
+	root := &cobra.Command{Use: "mirage", SilenceUsage: true, SilenceErrors: true}
+	root.PersistentFlags().String("server", "", "private Mirage server URL")
+	root.PersistentFlags().String("token", "", "space bearer token")
+	root.PersistentFlags().Bool("json", false, "emit JSON")
+	root.PersistentFlags().String("config", "", "configuration file")
+	_ = root
+	args = expandEquals(args)
 	if len(args) == 0 {
 		c.help()
 		return 0
 	}
-	// global switches are accepted before every product command.
+	// Persistent globals may appear before or after subcommands, exactly like
+	// Cobra persistent flags. Remove them before subcommand-specific parsing.
 	cfgPath, server, globalToken, jsonOut := "", "", "", false
-	for len(args) > 0 {
-		switch args[0] {
-		case "--help", "-h", "help":
-			if len(args) == 1 {
-				c.help()
-				return 0
+	remaining := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--server", "--token", "--config":
+			if i+1 >= len(args) {
+				return c.usageError(args[i] + " requires a value")
 			}
-			return c.usageError("help does not accept arguments")
-		case "--version", "-v", "version":
-			if len(args) == 1 {
-				fmt.Fprintf(c.stdout, "mirage %s\n", c.version())
-				return 0
+			v := args[i+1]
+			i++
+			switch args[i-1] {
+			case "--server":
+				server = v
+			case "--token":
+				globalToken = v
+			case "--config":
+				cfgPath = v
 			}
-			return c.usageError("version does not accept arguments")
-		case "--server":
-			if len(args) < 2 {
-				return c.usageError("--server requires a value")
-			}
-			server, args = args[1], args[2:]
-		case "--token":
-			if len(args) < 2 {
-				return c.usageError("--token requires a value")
-			}
-			globalToken, args = args[1], args[2:]
-		case "--config":
-			if len(args) < 2 {
-				return c.usageError("--config requires a value")
-			}
-			cfgPath, args = args[1], args[2:]
 		case "--json":
 			jsonOut = true
-			args = args[1:]
 		default:
-			goto parsed
+			remaining = append(remaining, args[i])
 		}
 	}
-parsed:
+	args = remaining
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
+		if len(args) == 1 {
+			c.help()
+			return 0
+		}
+		return c.usageError("help does not accept arguments")
+	}
+	if len(args) > 0 && (args[0] == "--version" || args[0] == "-v" || args[0] == "version") {
+		if len(args) == 1 {
+			fmt.Fprintf(c.stdout, "mirage %s\n", c.version())
+			return 0
+		}
+		return c.usageError("version does not accept arguments")
+	}
 	if len(args) == 0 {
 		c.help()
 		return 0
@@ -249,7 +266,7 @@ func (c Command) space(a []string, base string, jout bool, conf config) int {
 				return c.fail(e)
 			}
 		}
-		return c.request(base, "DELETE", "/api/v1/spaces/"+alias, tok, map[string]any{"force": force, "reason": reason}, jout, func(map[string]any) { fmt.Fprintln(c.stdout, "Deleted space", alias) })
+		return c.request(base, "DELETE", "/api/v1/spaces/"+url.PathEscape(alias), tok, map[string]any{"force": force, "reason": reason}, jout, func(map[string]any) { fmt.Fprintln(c.stdout, "Deleted space", alias) })
 	}
 	return c.usageError("unknown space command " + sub)
 }
@@ -366,7 +383,7 @@ func (c Command) link(a []string, base string, jout bool, conf config) int {
 		if e := popToken(); e != nil {
 			return c.fail(e)
 		}
-		method, path := "DELETE", "/api/v1/links/"+name
+		method, path := "DELETE", "/api/v1/links/"+url.PathEscape(name)
 		if sub == "restart" {
 			method = "POST"
 			path += "/restart"
@@ -496,7 +513,8 @@ func (c Command) apiFail(status int, b []byte) int {
 }
 func (c Command) fail(e error) int { fmt.Fprintln(c.stderr, "mirage:", e); return 1 }
 func (c Command) printRows(v map[string]any, key string, fields []string) {
-	if one, ok := v[key[:len(key)-1]].(map[string]any); ok {
+	oneKey := strings.TrimSuffix(key, "s")
+	if one, ok := v[oneKey].(map[string]any); ok {
 		for _, f := range fields {
 			if x, ok := one[f]; ok {
 				fmt.Fprintf(c.stdout, "%s: %v\n", strings.Title(strings.ReplaceAll(f, "_", " ")), x)
@@ -504,8 +522,15 @@ func (c Command) printRows(v map[string]any, key string, fields []string) {
 		}
 		return
 	}
-	for _, x := range v[key].([]any) {
-		m, _ := x.(map[string]any)
+	items, ok := v[key].([]any)
+	if !ok {
+		return
+	}
+	for _, x := range items {
+		m, ok := x.(map[string]any)
+		if !ok {
+			continue
+		}
 		for i, f := range fields {
 			if i > 0 {
 				fmt.Fprint(c.stdout, "\t")
@@ -515,6 +540,20 @@ func (c Command) printRows(v map[string]any, key string, fields []string) {
 		fmt.Fprintln(c.stdout)
 	}
 }
+
+// expandEquals accepts the standard pflag/Cobra --flag=value spelling.
+func expandEquals(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		if k, v, ok := strings.Cut(a, "="); ok && (k == "--server" || k == "--token" || k == "--config" || k == "--public" || k == "--private" || k == "--ttl" || k == "--alias" || k == "--name" || k == "--command" || k == "--execution-folder" || k == "--health-check" || k == "--grace" || k == "--tail" || k == "--force") {
+			out = append(out, k, v)
+		} else {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func (c Command) help() {
 	fmt.Fprint(c.stdout, `Mirage manages temporary local application environments.
 
@@ -590,5 +629,23 @@ func loadConfig(path string, getenv func(string) string, getwd func() (string, e
 			c.DataPath = v
 		}
 	}
+	if c.BaseHost != "" {
+		if _, err := domain.ParseBaseHost(c.BaseHost); err != nil {
+			return c, fmt.Errorf("config base_host: %w", err)
+		}
+	}
+	for _, a := range []string{c.PublicAddress, c.PrivateAddress} {
+		if a != "" && !validBind(a) {
+			return c, fmt.Errorf("invalid bind address %q", a)
+		}
+	}
 	return c, nil
+}
+func validBind(a string) bool {
+	_, p, err := net.SplitHostPort(a)
+	if err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(p)
+	return err == nil && n > 0 && n < 65536
 }
