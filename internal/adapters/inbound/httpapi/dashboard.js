@@ -47,7 +47,7 @@
     const form = document.querySelector("#confirm-form");
     if (!dialog || !form) return;
     event.preventDefault();
-    form.dataset.method = action.dataset.confirmAction === "delete-link" ? "DELETE" : "POST";
+    form.dataset.method = ["delete-link", "delete-space"].includes(action.dataset.confirmAction) ? "DELETE" : "POST";
     form.dataset.target = action.dataset.confirmTarget;
     document.querySelector("#confirm-title").textContent = `Confirm ${action.dataset.confirmAction.replaceAll("-", " ")}`;
     document.querySelector("#confirm-description").textContent = `This will affect ${action.dataset.confirmName}. Provide an audit reason to continue.`;

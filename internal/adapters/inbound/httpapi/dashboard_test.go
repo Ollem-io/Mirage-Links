@@ -34,7 +34,7 @@ func TestDashboardPrivateFragmentsAndEscaping(t *testing.T) {
 		t.Fatalf("anonymous dashboard=%d", w.Code)
 	}
 	w := dashboardRequest(h, "GET", "/dashboard", "token")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "Mirage dashboard") || strings.Contains(w.Body.String(), "SECRET_HASH") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "Mirage dashboard") || strings.Contains(w.Body.String(), "SECRET_HASH") || strings.Contains(w.Body.String(), `data-theme="light"`) {
 		t.Fatalf("page %d: %s", w.Code, w.Body.String())
 	}
 	w = dashboardRequest(h, "GET", "/dashboard/links", "token")
@@ -92,8 +92,8 @@ func TestDashboardMutationFragmentsAndCookies(t *testing.T) {
 		}
 	}
 	w = dashboardRequest(h, "GET", "/dashboard/assets/dashboard.js", "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "fetch") {
-		t.Fatal("embedded script unavailable")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "fetch") || !strings.Contains(w.Body.String(), `"delete-space"`) || !strings.Contains(w.Body.String(), `"DELETE"`) {
+		t.Fatal("embedded script unavailable or does not delete a space with DELETE")
 	}
 }
 
