@@ -21,6 +21,7 @@ type SpaceRepository interface {
 type LinkRepository interface {
 	CreateLink(context.Context, domain.Link) error
 	FindLink(context.Context, domain.SpaceID, domain.LinkName) (domain.Link, error)
+	LinkDeleted(context.Context, domain.SpaceID, domain.LinkName) (bool, error)
 	ListLinks(context.Context, domain.SpaceID) ([]domain.Link, error)
 	SaveLink(context.Context, domain.Link) error
 	ExpiredLinks(context.Context, time.Time) ([]domain.Link, error)

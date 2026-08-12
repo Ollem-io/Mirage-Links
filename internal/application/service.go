@@ -36,7 +36,6 @@ type Service struct {
 	StopGrace  time.Duration
 	mu         sync.Mutex
 	scheduled  map[domain.LinkID]ports.CancelFunc
-	deleted    map[string]bool
 }
 
 func (s *Service) now() time.Time {
@@ -55,7 +54,6 @@ func (s *Service) lock() {
 	s.mu.Lock()
 	if s.scheduled == nil {
 		s.scheduled = map[domain.LinkID]ports.CancelFunc{}
-		s.deleted = map[string]bool{}
 	}
 }
 func (s *Service) unlock() { s.mu.Unlock() }
@@ -322,9 +320,7 @@ func (s *Service) route(sp domain.Space, l domain.Link) ports.Route {
 	return ports.Route{LinkID: l.ID, Hostname: s.BaseHost.Host(l.Name, sp.Alias), Upstream: fmt.Sprintf("127.0.0.1:%d", l.AllocatedPort)}
 }
 func (s *Service) failStart(ctx context.Context, l domain.Link, p ports.Port, cause error) (CreateLinkResult, error) {
-	// Compensation order is route -> process -> reservation. Remove is harmless
-	// if no route was ever published, allowing every failure branch one cleanup path.
-	_ = compensation.Run(ctx, compensation.Steps{
+	compErr := compensation.Run(ctx, compensation.Steps{
 		RemoveRoute: func(c context.Context) error { return s.Proxy.Remove(c, l.ID) },
 		StopProcess: func(c context.Context) error {
 			if l.ProcessIdentity == "" {
@@ -340,11 +336,16 @@ func (s *Service) failStart(ctx context.Context, l domain.Link, p ports.Port, ca
 		},
 	})
 	l.Status = domain.StatusFailed
-	l.ProcessIdentity = ""
-	l.AllocatedPort = 0
-	_ = s.Repo.SaveLink(ctx, l)
-	_ = s.Repo.DeleteLink(ctx, l.ID)
-	return CreateLinkResult{Link: l, RecentLogs: s.recent(ctx, l.ID)}, fmt.Errorf("link startup failed: %w", cause)
+	if compErr == nil {
+		l.ProcessIdentity = ""
+		l.AllocatedPort = 0
+	}
+	saveErr := s.Repo.SaveLink(ctx, l)
+	logs := s.recent(ctx, l.ID)
+	if compErr != nil || saveErr != nil {
+		return CreateLinkResult{Link: l, RecentLogs: logs}, domain.NewInternal(fmt.Sprintf("startup compensation failed (cause=%v, compensation=%v, persistence=%v)", cause, compErr, saveErr))
+	}
+	return CreateLinkResult{Link: l, RecentLogs: logs}, fmt.Errorf("link startup failed: %w", cause)
 }
 func (s *Service) ListLinks(ctx context.Context, alias string, token domain.Token) ([]domain.Link, error) {
 	a, e := domain.ParseAlias(alias)
@@ -391,17 +392,21 @@ func (s *Service) DeleteLink(ctx context.Context, in LinkMutationInput) error {
 	defer s.unlock()
 	sp, l, e := s.linkAuth(ctx, in)
 	if e != nil {
-		// A repeated delete of a link this coordinator already deleted is a no-op.
-		// Unknown names remain not-found, as required by the API contract.
-		if domain.IsKind(e, domain.NotFound) && s.deleted[string(sp.ID)+"/"+in.Name] {
-			return nil
+		if domain.IsKind(e, domain.NotFound) && sp.ID != "" {
+			n, parseErr := domain.ParseLinkName(in.Name)
+			if parseErr == nil {
+				deleted, queryErr := s.Repo.LinkDeleted(ctx, sp.ID, n)
+				if queryErr != nil {
+					return queryErr
+				}
+				if deleted {
+					return nil
+				}
+			}
 		}
 		return e
 	}
-	if e = s.destroy(ctx, l, domain.StatusDeleted); e == nil {
-		s.deleted[string(sp.ID)+"/"+string(l.Name)] = true
-	}
-	return e
+	return s.destroy(ctx, l, domain.StatusDeleted)
 }
 func (s *Service) linkAuth(ctx context.Context, in LinkMutationInput) (domain.Space, domain.Link, error) {
 	a, e := domain.ParseAlias(in.Alias)
@@ -441,7 +446,13 @@ func (s *Service) destroy(ctx context.Context, l domain.Link, terminal domain.Li
 		c()
 		delete(s.scheduled, l.ID)
 	}
-	_ = compensation.Run(ctx, s.compensationSteps(l))
+	if e := compensation.Run(ctx, s.compensationSteps(l)); e != nil {
+		l.Status = domain.StatusFailed
+		if saveErr := s.Repo.SaveLink(ctx, l); saveErr != nil {
+			return domain.NewInternal(fmt.Sprintf("cleanup failed: %v; persist failed: %v", e, saveErr))
+		}
+		return domain.NewInternal(fmt.Sprintf("cleanup failed: %v", e))
+	}
 	l.Status = terminal
 	l.ProcessIdentity = ""
 	l.AllocatedPort = 0
@@ -473,7 +484,13 @@ func (s *Service) RestartLink(ctx context.Context, in LinkMutationInput) (Create
 	return s.start(ctx, sp, l)
 }
 func (s *Service) destroyForRestart(ctx context.Context, l domain.Link) error {
-	_ = compensation.Run(ctx, s.compensationSteps(l))
+	if e := compensation.Run(ctx, s.compensationSteps(l)); e != nil {
+		l.Status = domain.StatusFailed
+		if saveErr := s.Repo.SaveLink(ctx, l); saveErr != nil {
+			return domain.NewInternal(fmt.Sprintf("restart cleanup failed: %v; persist failed: %v", e, saveErr))
+		}
+		return domain.NewInternal(fmt.Sprintf("restart cleanup failed: %v", e))
+	}
 	return nil
 }
 
@@ -545,8 +562,43 @@ func (s *Service) runScheduledRestart(ctx context.Context, sp domain.Space, l do
 	cur.Status = domain.StatusCreating
 	cur.ProcessIdentity = ""
 	cur.AllocatedPort = 0
-	_ = s.Repo.SaveLink(ctx, cur)
-	_, _ = s.start(ctx, sp, cur)
+	if e = s.Repo.SaveLink(ctx, cur); e != nil {
+		cur.Status = domain.StatusFailed
+		s.rescheduleFailed(ctx, sp, cur)
+		return
+	}
+	if _, e = s.start(ctx, sp, cur); e != nil {
+		latest, findErr := s.Repo.FindLink(ctx, cur.SpaceID, cur.Name)
+		if findErr == nil {
+			cur = latest
+		}
+		s.rescheduleFailed(ctx, sp, cur)
+	}
+}
+func (s *Service) rescheduleFailed(ctx context.Context, sp domain.Space, l domain.Link) {
+	if s.Scheduler == nil || !l.AutoRestart || l.Expired(s.now()) {
+		return
+	}
+	l.RestartCount++
+	d := time.Second * time.Duration(1<<min(l.RestartCount-1, 6))
+	if d > time.Minute {
+		d = time.Minute
+	}
+	at := s.now().Add(d)
+	if !l.ExpiresAt.After(at) {
+		l.Status = domain.StatusExpired
+		_ = s.Repo.SaveLink(ctx, l)
+		return
+	}
+	l.Status = domain.StatusFailed
+	l.NextRestartAt = at
+	if e := s.Repo.SaveLink(ctx, l); e != nil {
+		return
+	}
+	cancel, e := s.Scheduler.Schedule(ctx, at, func(c context.Context) { s.runScheduledRestart(c, sp, l) })
+	if e == nil {
+		s.scheduled[l.ID] = cancel
+	}
 }
 
 // Cleanup gives TTL priority over all other desired state.

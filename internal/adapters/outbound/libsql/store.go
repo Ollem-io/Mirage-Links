@@ -216,6 +216,9 @@ func (s *Store) CreateLink(c context.Context, v domain.Link) error {
 func (s *Store) FindLink(c context.Context, sid domain.SpaceID, n domain.LinkName) (domain.Link, error) {
 	return repository{s.db}.FindLink(c, sid, n)
 }
+func (s *Store) LinkDeleted(c context.Context, sid domain.SpaceID, n domain.LinkName) (bool, error) {
+	return repository{s.db}.LinkDeleted(c, sid, n)
+}
 func (s *Store) ListLinks(c context.Context, sid domain.SpaceID) ([]domain.Link, error) {
 	return repository{s.db}.ListLinks(c, sid)
 }
@@ -344,6 +347,11 @@ func nullableTime(t time.Time) any {
 
 func (r repository) FindLink(c context.Context, s domain.SpaceID, n domain.LinkName) (domain.Link, error) {
 	return scanLink(r.q.QueryRowContext(c, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at,auto_restart FROM links WHERE space_id=? AND name=? AND deleted_at IS NULL`, s, n))
+}
+func (r repository) LinkDeleted(c context.Context, s domain.SpaceID, n domain.LinkName) (bool, error) {
+	var deleted int
+	e := r.q.QueryRowContext(c, `SELECT count(*) FROM links WHERE space_id=? AND name=? AND deleted_at IS NOT NULL`, s, n).Scan(&deleted)
+	return deleted > 0, e
 }
 func (r repository) ListLinks(c context.Context, s domain.SpaceID) ([]domain.Link, error) {
 	rows, e := r.q.QueryContext(c, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at,auto_restart FROM links WHERE space_id=? AND deleted_at IS NULL ORDER BY name`, s)

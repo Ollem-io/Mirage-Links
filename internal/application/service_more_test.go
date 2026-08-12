@@ -255,3 +255,81 @@ func TestSpaceTTLBoundsLinkAndForceAudit(t *testing.T) {
 		t.Fatal("audit unavailable")
 	}
 }
+
+func TestCleanupFailuresRemainDurablyFailed(t *testing.T) {
+	for _, op := range []string{"remove", "stop", "release"} {
+		t.Run(op, func(t *testing.T) {
+			s, f, tok := setup(t)
+			ctx := context.Background()
+			if _, e := s.CreateLink(ctx, input(tok)); e != nil {
+				t.Fatal(e)
+			}
+			f.fail = op
+			e := s.DeleteLink(ctx, LinkMutationInput{Alias: "calm-fox", Token: tok, Name: "api"})
+			if !domain.IsKind(e, domain.Internal) {
+				t.Fatal(e)
+			}
+			l, e := s.Repo.FindLink(ctx, "s", "api")
+			if e != nil || l.Status != domain.StatusFailed {
+				t.Fatal(e, l.Status)
+			}
+			if _, e = s.RestartLink(ctx, LinkMutationInput{Alias: "calm-fox", Token: tok, Name: "api"}); !domain.IsKind(e, domain.Internal) {
+				t.Fatal(e)
+			}
+		})
+	}
+}
+func TestDeleteIdempotencyAcrossServiceInstances(t *testing.T) {
+	s, _, tok := setup(t)
+	ctx := context.Background()
+	if _, e := s.CreateLink(ctx, input(tok)); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.DeleteLink(ctx, LinkMutationInput{Alias: "calm-fox", Token: tok, Name: "api"}); e != nil {
+		t.Fatal(e)
+	}
+	s2 := &Service{Repo: s.Repo, Clock: s.Clock, IDs: s.IDs, Aliases: s.Aliases, Tokens: s.Tokens, Hashes: s.Hashes, Ports: s.Ports, Processes: s.Processes, Health: s.Health, Proxy: s.Proxy, Logs: s.Logs, Audit: s.Audit, Scheduler: s.Scheduler, BaseHost: s.BaseHost, PublicPort: s.PublicPort}
+	if e := s2.DeleteLink(ctx, LinkMutationInput{Alias: "calm-fox", Token: tok, Name: "api"}); e != nil {
+		t.Fatal(e)
+	}
+	if e := s2.DeleteLink(ctx, LinkMutationInput{Alias: "calm-fox", Token: tok, Name: "unknown"}); !domain.IsKind(e, domain.NotFound) {
+		t.Fatal(e)
+	}
+}
+func TestScheduledFailureReschedulesDurableFailed(t *testing.T) {
+	s, f, tok := setup(t)
+	ctx := context.Background()
+	sc := &sched{}
+	s.Scheduler = sc
+	if _, e := s.CreateLink(ctx, input(tok)); e != nil {
+		t.Fatal(e)
+	}
+	at, e := s.ScheduleAutomaticRestart(ctx, "calm-fox", tok, "api")
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.now = at
+	f.fail = "start"
+	sc.fn(ctx)
+	l, e := s.Repo.FindLink(ctx, "s", "api")
+	if e != nil || l.Status != domain.StatusFailed || !l.NextRestartAt.After(f.now) {
+		t.Fatal(e, l)
+	}
+}
+
+func TestQueryErrorBranches(t *testing.T) {
+	s, _, tok := setup(t)
+	ctx := context.Background()
+	if _, e := s.ListLinks(ctx, "BAD_", tok); !domain.IsKind(e, domain.Validation) {
+		t.Fatal(e)
+	}
+	if _, e := s.ListLinks(ctx, "calm-fox", "bad"); !domain.IsKind(e, domain.Unauthorized) {
+		t.Fatal(e)
+	}
+	if _, e := s.LogsFor(ctx, "calm-fox", tok, "BAD_", 1); !domain.IsKind(e, domain.Validation) {
+		t.Fatal(e)
+	}
+	if _, e := s.LogsFor(ctx, "calm-fox", tok, "missing", 1); !domain.IsKind(e, domain.NotFound) {
+		t.Fatal(e)
+	}
+}

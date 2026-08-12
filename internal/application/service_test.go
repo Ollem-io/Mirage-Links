@@ -13,13 +13,14 @@ import (
 )
 
 type mem struct {
-	spaces map[domain.Alias]domain.Space
-	links  map[domain.LinkID]domain.Link
-	mu     sync.Mutex
+	spaces     map[domain.Alias]domain.Space
+	links      map[domain.LinkID]domain.Link
+	tombstones map[string]struct{}
+	mu         sync.Mutex
 }
 
 func newMem() *mem {
-	return &mem{spaces: map[domain.Alias]domain.Space{}, links: map[domain.LinkID]domain.Link{}}
+	return &mem{spaces: map[domain.Alias]domain.Space{}, links: map[domain.LinkID]domain.Link{}, tombstones: map[string]struct{}{}}
 }
 func (m *mem) CreateSpace(_ context.Context, x domain.Space) error {
 	m.mu.Lock()
@@ -111,6 +112,12 @@ func (m *mem) FindLink(_ context.Context, s domain.SpaceID, n domain.LinkName) (
 	}
 	return domain.Link{}, domain.NewNotFound("link")
 }
+func (m *mem) LinkDeleted(_ context.Context, sid domain.SpaceID, n domain.LinkName) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.tombstones[string(sid)+"/"+string(n)]
+	return ok, nil
+}
 func (m *mem) ListLinks(_ context.Context, s domain.SpaceID) ([]domain.Link, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -149,6 +156,8 @@ func (m *mem) DeleteLink(_ context.Context, id domain.LinkID) error {
 	if _, ok := m.links[id]; !ok {
 		return domain.NewNotFound("link")
 	}
+	x := m.links[id]
+	m.tombstones[string(x.SpaceID)+"/"+string(x.Name)] = struct{}{}
 	delete(m.links, id)
 	return nil
 }
@@ -178,6 +187,9 @@ func (f *fake) Allocate(context.Context) (ports.Port, error) {
 }
 func (f *fake) Release(context.Context, ports.Port) error {
 	f.events = append(f.events, "release")
+	if f.fail == "release" {
+		return errors.New("release")
+	}
 	return nil
 }
 func (f *fake) Start(context.Context, ports.StartRequest) (ports.ProcessIdentity, error) {
@@ -189,6 +201,9 @@ func (f *fake) Start(context.Context, ports.StartRequest) (ports.ProcessIdentity
 }
 func (f *fake) Stop(context.Context, ports.ProcessIdentity, time.Duration) error {
 	f.events = append(f.events, "stop")
+	if f.fail == "stop" {
+		return errors.New("stop")
+	}
 	return nil
 }
 func (f *fake) Alive(context.Context, ports.ProcessIdentity) (bool, error) { return true, nil }
@@ -208,6 +223,9 @@ func (f *fake) Add(context.Context, ports.Route) error {
 }
 func (f *fake) Remove(context.Context, domain.LinkID) error {
 	f.events = append(f.events, "remove")
+	if f.fail == "remove" {
+		return errors.New("remove")
+	}
 	return nil
 }
 func (f *fake) List(context.Context) ([]ports.Route, error)    { return nil, nil }

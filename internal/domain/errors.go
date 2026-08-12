@@ -10,6 +10,7 @@ const (
 	Conflict     ErrorKind = "conflict"
 	NotFound     ErrorKind = "not_found"
 	Unauthorized ErrorKind = "unauthorized"
+	Internal     ErrorKind = "internal"
 )
 
 type Error struct {
@@ -28,4 +29,5 @@ func NewValidation(field, message string) error { return &Error{Validation, fiel
 func NewConflict(message string) error          { return &Error{Conflict, "", message} }
 func NewNotFound(message string) error          { return &Error{NotFound, "", message} }
 func NewUnauthorized(message string) error      { return &Error{Unauthorized, "", message} }
+func NewInternal(message string) error          { return &Error{Internal, "", message} }
 func IsKind(err error, kind ErrorKind) bool     { e, ok := err.(*Error); return ok && e.Kind == kind }

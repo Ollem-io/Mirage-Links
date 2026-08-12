@@ -506,3 +506,37 @@ func TestUpgradeOriginalV1Fixture(t *testing.T) {
 		t.Fatalf("upgraded foreign key did not cascade: %d %v", links, err)
 	}
 }
+
+func TestDeletedLinkTombstoneQuerySurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tombstone.db")
+	s, e := Open(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx := context.Background()
+	sp := space("s-tomb", "tomb", time.Now().Add(time.Hour))
+	if e = s.CreateSpace(ctx, sp); e != nil {
+		t.Fatal(e)
+	}
+	l := link("l-tomb", string(sp.ID), "api", time.Now().Add(time.Hour))
+	if e = s.CreateLink(ctx, l); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.DeleteLink(ctx, l.ID); e != nil {
+		t.Fatal(e)
+	}
+	s.Close()
+	s, e = Open(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	deleted, e := s.LinkDeleted(ctx, sp.ID, l.Name)
+	if e != nil || !deleted {
+		t.Fatal(e, deleted)
+	}
+	deleted, e = s.LinkDeleted(ctx, sp.ID, "unknown")
+	if e != nil || deleted {
+		t.Fatal(e, deleted)
+	}
+}
