@@ -412,3 +412,81 @@ func TestShutdownCanceled(t *testing.T) {
 		t.Fatal("expected cancellation")
 	}
 }
+
+type adminFake struct {
+	*fake
+	hash    *domain.AdminTokenHash
+	creates int
+	deletes int
+	changes int
+}
+
+func (f *adminFake) AdminConfigured() bool { return f.hash != nil }
+func (f *adminFake) AuthorizeAdmin(_ context.Context, t domain.AdminToken) error {
+	if f.hash == nil || !f.hash.Verify(t) {
+		return domain.NewUnauthorized("bad")
+	}
+	return nil
+}
+func (f *adminFake) AdminListSpaces(context.Context, domain.AdminToken) ([]domain.Space, error) {
+	return []domain.Space{f.space}, nil
+}
+func (f *adminFake) AdminCreateSpace(context.Context, domain.AdminToken, application.CreateSpaceInput) (application.CreateSpaceResult, error) {
+	f.creates++
+	return application.CreateSpaceResult{Space: f.space, Token: "mir_once"}, nil
+}
+func (f *adminFake) AdminGetSpace(context.Context, domain.AdminToken, string) (domain.Space, error) {
+	return f.space, nil
+}
+func (f *adminFake) AdminDeleteSpace(context.Context, domain.AdminToken, application.DeleteSpaceInput) error {
+	f.deletes++
+	return nil
+}
+func (f *adminFake) AdminListLinks(context.Context, domain.AdminToken, string) ([]domain.Link, error) {
+	return []domain.Link{f.link}, nil
+}
+func (f *adminFake) AdminLogsFor(context.Context, domain.AdminToken, string, string, int) ([]ports.LogEntry, error) {
+	return []ports.LogEntry{{Text: "admin log"}}, nil
+}
+func (f *adminFake) AdminRestartLink(context.Context, domain.AdminToken, string, string, string) (application.CreateLinkResult, error) {
+	f.changes++
+	return application.CreateLinkResult{Link: f.link}, nil
+}
+func (f *adminFake) AdminDeleteLink(context.Context, domain.AdminToken, string, string, string) error {
+	f.changes++
+	return nil
+}
+func TestAdminAliasRoutes(t *testing.T) {
+	raw, _ := domain.NewAdminToken()
+	t.Log(raw.Reveal())
+	h := raw.Hash()
+	f := &adminFake{fake: fixture(), hash: &h}
+	a := New(f, Config{})
+	a.SetReady(true)
+	srv := a.Handler()
+	call := func(method, path, body, token string) int {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+token)
+		if body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w.Code
+	}
+	if x := call("GET", "/api/v1/admin/spaces/calm/links", "", raw.Reveal()); x != 200 {
+		t.Fatal(x)
+	}
+	if x := call("GET", "/api/v1/admin/spaces/calm/links/api/logs", "", raw.Reveal()); x != 200 {
+		t.Fatal(x)
+	}
+	if x := call("POST", "/api/v1/admin/spaces/calm/links/api/restart", `{"reason":"x"}`, raw.Reveal()); x != 200 {
+		t.Fatal(x)
+	}
+	if x := call("DELETE", "/api/v1/admin/spaces/calm/links/api/delete", `{"reason":"x"}`, raw.Reveal()); x != 204 {
+		t.Fatal(x)
+	}
+	if x := call("GET", "/api/v1/admin/spaces/calm/links", "", "mir_bad"); x != 401 {
+		t.Fatal(x)
+	}
+}

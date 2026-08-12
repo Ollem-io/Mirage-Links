@@ -271,7 +271,11 @@ func adminBearer(r *http.Request) (domain.AdminToken, error) {
 	if !strings.HasPrefix(v, p) {
 		return "", domain.NewUnauthorized("missing admin bearer token")
 	}
-	return domain.ParseAdminToken(strings.TrimSpace(strings.TrimPrefix(v, p)))
+	t, err := domain.ParseAdminToken(strings.TrimSpace(strings.TrimPrefix(v, p)))
+	if err != nil {
+		return "", domain.NewUnauthorized("invalid admin bearer token")
+	}
+	return t, nil
 }
 func (a *API) admin(r *http.Request) (adminService, domain.AdminToken, error) {
 	x, ok := a.service.(adminService)

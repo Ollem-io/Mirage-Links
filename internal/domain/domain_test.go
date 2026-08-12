@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -251,5 +252,24 @@ func TestPublicURLWithSchemeMatrix(t *testing.T) {
 		if err != nil || got != tc.want {
 			t.Fatalf("%s:%d = %q, %v", tc.scheme, tc.port, got, err)
 		}
+	}
+}
+
+func TestAdminTokenSeparateAndRedacted(t *testing.T) {
+	a, e := NewAdminToken()
+	if e != nil || !strings.HasPrefix(a.Reveal(), "mir_admin_") {
+		t.Fatal(a, e)
+	}
+	if _, e = ParseToken(a.Reveal()); e == nil {
+		t.Fatal("admin accepted as space")
+	}
+	if _, e = ParseAdminToken("mir_x"); e == nil {
+		t.Fatal("space accepted as admin")
+	}
+	if got, _ := a.MarshalJSON(); strings.Contains(string(got), a.Reveal()) {
+		t.Fatal("leak")
+	}
+	if !a.Hash().Verify(a) {
+		t.Fatal("hash")
 	}
 }
