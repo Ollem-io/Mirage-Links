@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/base64"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -67,12 +69,36 @@ func (a *API) dashboardAuth(w http.ResponseWriter, r *http.Request) (domain.Spac
 	if e != nil {
 		return domain.Space{}, "", false
 	}
-	// A bearer token is exchanged for an HttpOnly, same-site cookie. It is never
-	// interpolated into HTML, logs, an URL, or an error response.
 	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-		http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_token", Value: t.Reveal(), Path: "/dashboard", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+		secure := r.TLS != nil
+		http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_token", Value: t.Reveal(), Path: "/dashboard", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure})
+		csrf := make([]byte, 24)
+		if _, e := rand.Read(csrf); e != nil {
+			return domain.Space{}, "", false
+		}
+		http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_csrf", Value: base64.RawURLEncoding.EncodeToString(csrf), Path: "/dashboard", SameSite: http.SameSiteStrictMode, Secure: secure})
 	}
 	return s, t, true
+}
+
+// Cookie authentication is protected from cross-site form submission. Bearer
+// authentication is an API-client token strategy and does not use cookie CSRF.
+func dashboardCSRF(r *http.Request) bool {
+	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		return true
+	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		u, e := url.Parse(origin)
+		if e != nil || u.Host != r.Host {
+			return false
+		}
+	}
+	c, e := r.Cookie("mirage_dashboard_csrf")
+	return e == nil && c.Value != "" && r.Header.Get("X-Mirage-CSRF") == c.Value
 }
 func dashboardForbidden(w http.ResponseWriter) {
 	writeErr(w, http.StatusNotFound, "not_found", "route not found", nil)
@@ -91,7 +117,7 @@ func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s, t, ok := a.dashboardAuth(w, r)
-	if !ok {
+	if !ok || !dashboardCSRF(r) {
 		dashboardForbidden(w)
 		return
 	}
