@@ -364,13 +364,19 @@ func TestDecodeAndDrainEdges(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatal(w.Code)
 	}
-	b := New(fixture(), Config{})
+	// Keep one admitted mutation open, then deterministically cancel its drain.
+	f := fixture()
+	f.entered, f.release = make(chan struct{}), make(chan struct{})
+	b := New(f, Config{})
 	b.SetReady(true)
+	go request(b.Handler(), "POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"GET http://127.0.0.1:8/"}`, true)
+	<-f.entered
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if e := b.Drain(ctx); e == nil {
 		t.Fatal("expected canceled drain")
 	}
+	close(f.release)
 }
 
 type errReader struct{}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,12 +41,14 @@ type Config struct {
 	MaxBodyBytes   int
 }
 type API struct {
-	service   Service
-	timeout   time.Duration
-	maxBody   int
-	ready     atomic.Bool
-	draining  atomic.Bool
-	mutations sync.WaitGroup
+	service         Service
+	timeout         time.Duration
+	maxBody         int
+	ready           atomic.Bool
+	gateMu          sync.Mutex
+	draining        bool
+	activeMutations int
+	drained         chan struct{}
 }
 
 func New(service Service, cfg Config) *API {
@@ -59,15 +62,29 @@ func New(service Service, cfg Config) *API {
 	return a
 }
 func (a *API) SetReady(v bool) { a.ready.Store(v) }
-func (a *API) Ready() bool     { return a.ready.Load() && !a.draining.Load() }
+func (a *API) Ready() bool {
+	a.gateMu.Lock()
+	draining := a.draining
+	a.gateMu.Unlock()
+	return a.ready.Load() && !draining
+}
 
-// Drain rejects new unsafe calls, marks readiness false, then waits for calls
-// already admitted. The caller's context bounds shutdown.
+// Drain atomically closes mutation admission before observing in-flight work.
+// Unlike a WaitGroup Add concurrent with Wait, this gate is safe when request
+// admission races shutdown.
 func (a *API) Drain(ctx context.Context) error {
-	a.draining.Store(true)
 	a.ready.Store(false)
-	done := make(chan struct{})
-	go func() { a.mutations.Wait(); close(done) }()
+	a.gateMu.Lock()
+	a.draining = true
+	if a.activeMutations == 0 {
+		a.gateMu.Unlock()
+		return nil
+	}
+	if a.drained == nil {
+		a.drained = make(chan struct{})
+	}
+	done := a.drained
+	a.gateMu.Unlock()
 	select {
 	case <-done:
 		return nil
@@ -159,7 +176,8 @@ func apiErr(w http.ResponseWriter, err error) {
 	}
 }
 func decode(w http.ResponseWriter, r *http.Request, max int, v any) bool {
-	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
 		writeErr(w, 415, "unsupported_media_type", "Content-Type must be application/json", nil)
 		return false
 	}
@@ -177,16 +195,23 @@ func decode(w http.ResponseWriter, r *http.Request, max int, v any) bool {
 	return true
 }
 func (a *API) mutation(w http.ResponseWriter, r *http.Request, fn func()) {
-	if a.draining.Load() {
+	a.gateMu.Lock()
+	if a.draining {
+		a.gateMu.Unlock()
 		writeErr(w, 503, "draining", "server is draining", nil)
 		return
 	}
-	a.mutations.Add(1)
-	defer a.mutations.Done()
-	if a.draining.Load() {
-		writeErr(w, 503, "draining", "server is draining", nil)
-		return
-	}
+	a.activeMutations++
+	a.gateMu.Unlock()
+	defer func() {
+		a.gateMu.Lock()
+		a.activeMutations--
+		if a.draining && a.activeMutations == 0 && a.drained != nil {
+			close(a.drained)
+			a.drained = nil
+		}
+		a.gateMu.Unlock()
+	}()
 	fn()
 }
 
