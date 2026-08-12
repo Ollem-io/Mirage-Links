@@ -424,16 +424,61 @@ func (a *API) dashboardAdminRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const pre = "/spaces/"
-	if strings.HasPrefix(path, pre) && r.Method == http.MethodGet {
-		alias := strings.TrimPrefix(path, pre)
-		sp, e := ad.AdminGetSpace(r.Context(), t, alias)
-		if e != nil {
-			dashboardForbidden(w)
+	if strings.HasPrefix(path, pre) {
+		bits := strings.Split(strings.TrimPrefix(path, pre), "/")
+		alias := bits[0]
+		if len(bits) >= 3 && bits[1] == "links" {
+			name := bits[2]
+			if len(bits) == 4 && bits[3] == "logs" && r.Method == http.MethodGet {
+				x, e := ad.AdminLogsFor(r.Context(), t, alias, name, 100)
+				if e != nil {
+					dashboardForbidden(w)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				for _, v := range x {
+					fmt.Fprintf(w, "<pre>%s</pre>", template.HTMLEscapeString(v.Text))
+				}
+				return
+			}
+			if len(bits) == 4 && (bits[3] == "restart" || bits[3] == "delete") && r.Method == http.MethodPost {
+				_ = r.ParseForm()
+				reason := strings.TrimSpace(r.FormValue("reason"))
+				var e error
+				if bits[3] == "restart" {
+					_, e = ad.AdminRestartLink(r.Context(), t, alias, name, reason)
+				} else {
+					e = ad.AdminDeleteLink(r.Context(), t, alias, name, reason)
+				}
+				if e != nil {
+					http.Error(w, "Operation failed", 400)
+					return
+				}
+				http.Redirect(w, r, "/dashboard/admin/spaces/"+url.PathEscape(alias), 303)
+				return
+			}
+		}
+		if r.Method == http.MethodGet {
+			sp, e := ad.AdminGetSpace(r.Context(), t, alias)
+			if e != nil {
+				dashboardForbidden(w)
+				return
+			}
+			links, e := ad.AdminListLinks(r.Context(), t, alias)
+			if e != nil {
+				dashboardForbidden(w)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprintf(w, "<!doctype html><html><body><h1>Admin space %s</h1><p>Expires %s</p><a href='/dashboard/admin'>All spaces</a><div id=links>", template.HTMLEscapeString(sp.Alias.String()), template.HTMLEscapeString(sp.ExpiresAt.Format(time.RFC3339)))
+			for _, l := range links {
+				n := template.HTMLEscapeString(l.Name.String())
+				u := "/dashboard/admin/spaces/" + url.PathEscape(alias) + "/links/" + url.PathEscape(l.Name.String())
+				fmt.Fprintf(w, "<article><h2>%s</h2><button hx-get='%s/logs' hx-target='#logs-%s'>Logs</button><div id='logs-%s'></div><form hx-post='%s/restart'><input name=reason required placeholder=Reason><button>Restart</button></form><form hx-post='%s/delete'><input name=reason required placeholder=Reason><button>Delete</button></form></article>", n, u, n, n, u, u)
+			}
+			io.WriteString(w, "</div><script defer src='/dashboard/assets/dashboard.js'></script></body></html>")
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, "<!doctype html><h1>Admin space %s</h1><p>Expires %s</p><p>Use alias-bound admin API routes to manage links.</p>", template.HTMLEscapeString(sp.Alias.String()), template.HTMLEscapeString(sp.ExpiresAt.Format(time.RFC3339)))
-		return
 	}
 	dashboardForbidden(w)
 }

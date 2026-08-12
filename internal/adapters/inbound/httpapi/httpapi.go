@@ -261,6 +261,8 @@ type adminService interface {
 	AdminListLinks(context.Context, domain.AdminToken, string) ([]domain.Link, error)
 	AdminLogsFor(context.Context, domain.AdminToken, string, string, int) ([]ports.LogEntry, error)
 	AdminDeleteSpace(context.Context, domain.AdminToken, application.DeleteSpaceInput) error
+	AdminRestartLink(context.Context, domain.AdminToken, string, string, string) (application.CreateLinkResult, error)
+	AdminDeleteLink(context.Context, domain.AdminToken, string, string, string) error
 }
 
 func adminBearer(r *http.Request) (domain.AdminToken, error) {
@@ -604,6 +606,32 @@ func (a *API) adminLinks(w http.ResponseWriter, r *http.Request, seg []string) {
 		}
 		writeJSON(w, 200, map[string]any{"logs": x})
 		return
+	}
+	if len(seg) == 6 && (seg[5] == "restart" || seg[5] == "delete") {
+		var x struct {
+			Reason string `json:"reason"`
+		}
+		if !decode(w, r, a.maxBody, &x) {
+			return
+		}
+		if seg[5] == "restart" && r.Method == http.MethodPost {
+			z, e := ad.AdminRestartLink(r.Context(), t, alias, seg[4], x.Reason)
+			if e != nil {
+				apiErr(w, e)
+				return
+			}
+			writeJSON(w, 200, map[string]any{"link": outLink(z.Link, z.URL)})
+			return
+		}
+		if seg[5] == "delete" && r.Method == http.MethodDelete {
+			e := ad.AdminDeleteLink(r.Context(), t, alias, seg[4], x.Reason)
+			if e != nil {
+				apiErr(w, e)
+				return
+			}
+			w.WriteHeader(204)
+			return
+		}
 	}
 	method(w)
 }

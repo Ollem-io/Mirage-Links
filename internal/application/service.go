@@ -545,11 +545,25 @@ func (s *Service) FollowLogs(ctx context.Context, alias string, token domain.Tok
 }
 
 type LinkMutationInput struct {
-	Alias string
-	Token domain.Token
-	Name  string
+	Alias      string
+	Token      domain.Token
+	AdminToken domain.AdminToken
+	Name       string
 	// Reason identifies an operator dashboard action; no credential is recorded.
 	Reason string
+}
+
+func (s *Service) AdminRestartLink(ctx context.Context, token domain.AdminToken, alias, name, reason string) (CreateLinkResult, error) {
+	if strings.TrimSpace(reason) == "" {
+		return CreateLinkResult{}, domain.NewValidation("reason", "must not be empty")
+	}
+	return s.RestartLink(ctx, LinkMutationInput{Alias: alias, AdminToken: token, Name: name, Reason: reason})
+}
+func (s *Service) AdminDeleteLink(ctx context.Context, token domain.AdminToken, alias, name, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		return domain.NewValidation("reason", "must not be empty")
+	}
+	return s.DeleteLink(ctx, LinkMutationInput{Alias: alias, AdminToken: token, Name: name, Reason: reason})
 }
 
 func (s *Service) DeleteLink(ctx context.Context, in LinkMutationInput) error {
@@ -586,7 +600,14 @@ func (s *Service) linkAuth(ctx context.Context, in LinkMutationInput) (domain.Sp
 	if e != nil {
 		return domain.Space{}, domain.Link{}, e
 	}
-	sp, e := s.authenticate(ctx, a, in.Token)
+	var sp domain.Space
+	if in.AdminToken != "" {
+		if e = s.AuthorizeAdmin(ctx, in.AdminToken); e == nil {
+			sp, e = s.Repo.FindSpaceByAlias(ctx, a)
+		}
+	} else {
+		sp, e = s.authenticate(ctx, a, in.Token)
+	}
 	if e != nil {
 		return sp, domain.Link{}, e
 	}
