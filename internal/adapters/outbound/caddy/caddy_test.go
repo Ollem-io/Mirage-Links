@@ -322,10 +322,10 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 func TestReconcileCompensatesAfterCallerCancellationOrDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		stop func(context.CancelFunc)
+		stop func(context.CancelFunc, <-chan struct{})
 	}{
-		{"cancel", func(cancel context.CancelFunc) { cancel() }},
-		{"deadline", func(context.CancelFunc) { time.Sleep(2 * time.Millisecond) }},
+		{"cancel", func(cancel context.CancelFunc, _ <-chan struct{}) { cancel() }},
+		{"deadline", func(_ context.CancelFunc, done <-chan struct{}) { <-done }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, base := setup(t)
@@ -345,7 +345,7 @@ func TestReconcileCompensatesAfterCallerCancellationOrDeadline(t *testing.T) {
 				// GET snapshot and first PUT complete. Stop the caller immediately
 				// before the later POST, after an undo has been registered.
 				if requests == 3 {
-					tc.stop(cancel)
+					tc.stop(cancel, ctx.Done())
 				}
 				return transport.RoundTrip(r)
 			})}

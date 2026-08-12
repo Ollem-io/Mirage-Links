@@ -286,6 +286,24 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 		}
 		return cause
 	}
+	// A mutation that is canceled while in flight has an unknowable server-side
+	// outcome and can race its own compensation. Execute each mutation on a
+	// bounded detached context, while checking the caller immediately before and
+	// after it. Thus cancellation prevents a not-yet-started mutation, but an
+	// admitted mutation reaches a known terminal outcome before rollback starts.
+	mutate := func(method, path string, body any) error {
+		if err := ctx.Err(); err != nil {
+			return &Error{Timeout, err}
+		}
+		mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.compensationTimeout)
+		defer cancel()
+		err := c.write(mutationCtx, method, path, body)
+		if callerErr := ctx.Err(); callerErr != nil {
+			return &Error{Timeout, callerErr}
+		}
+		return err
+	}
+
 	// First repair existing desired records. PUT preserves both route index and
 	// every non-owned route byte for byte.
 	for i, existing := range all {
@@ -306,7 +324,7 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 		undos = append(undos, change{func(ctx context.Context) error {
 			return c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(index), before)
 		}})
-		if err := c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(index), encode(want)); err != nil {
+		if err := mutate(http.MethodPut, c.routesPath()+"/"+strconv.Itoa(index), encode(want)); err != nil {
 			return rollback(err)
 		}
 		delete(wanted, id)
@@ -327,7 +345,7 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 			}
 			return nil
 		}})
-		if err := c.write(ctx, http.MethodPost, c.routesPath(), encode(added)); err != nil {
+		if err := mutate(http.MethodPost, c.routesPath(), encode(added)); err != nil {
 			return rollback(err)
 		}
 	}
@@ -368,7 +386,7 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 			}
 			return c.write(ctx, http.MethodPost, c.routesPath()+"/"+strconv.Itoa(index), before)
 		}})
-		if err := c.write(ctx, http.MethodDelete, c.routesPath()+"/"+strconv.Itoa(index), nil); err != nil {
+		if err := mutate(http.MethodDelete, c.routesPath()+"/"+strconv.Itoa(index), nil); err != nil {
 			return rollback(err)
 		}
 	}
