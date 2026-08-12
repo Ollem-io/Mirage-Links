@@ -278,3 +278,13 @@ func TestServerWithoutScheme(t *testing.T) {
 		t.Fatal(x, er.String())
 	}
 }
+
+func TestHostilePathNamesRejected(t *testing.T) {
+	for _, a := range [][]string{{"space", "list", "bad/name"}, {"space", "delete", "bad/name", "--token", "t"}, {"link", "logs", "bad/name", "--token", "t"}, {"link", "delete", "bad/name", "--token", "t"}} {
+		var o, e bytes.Buffer
+		c := New(&o, &e, func() string { return "v" })
+		if c.Execute(a) == 0 {
+			t.Fatalf("%v", a)
+		}
+	}
+}
