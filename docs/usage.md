@@ -1,304 +1,143 @@
-# Mirage Usage (approved v1 contract)
+# Using Mirage
 
-This document is the user-approved v1 behavior. Commands use the `mirage` binary.
+Mirage lets a user or automation agent start a temporary server process and publish it only after a loopback health check succeeds. The process receives an assigned `PORT`; space and link TTLs provide automatic cleanup.
 
-> Approved by the product owner on 2026-08-12.
+Complete the [installation and deployment guide](setup.md) before using these commands. The private management API must remain private, and wildcard DNS must reach the configured public ingress.
 
-## 1. Install and configure
+## Safe agent workflow
 
-The project pins Go 1.26, Caddy, Node/Tailwind tooling, and development commands through `mise.toml`.
+Run the CLI on the Mirage host or set `MIRAGE_SERVER` to an authorized, identity-protected management endpoint. Do not place tokens in prompts, repositories, tickets, command arguments visible to other users, or logs.
 
-Mirage needs a wildcard DNS record pointing to the machine running its public port. For base host `mirage.example.com`, configure `*.mirage.example.com`. If `--public` is not 80/443, an upstream load balancer/NAT must forward public traffic to it.
+The examples use `jq` to read JSON safely:
 
-Example A — subdomain pattern:
+```sh
+(umask 077; mirage space create --ttl 1h --json > /tmp/mirage-space.json)
+export MIRAGE_TOKEN="$(jq -r .token /tmp/mirage-space.json)"
 
-```text
-DNS: *.mirage.example.com -> 203.0.113.10
-base_host: mirage.example.com
-result: api-calm-fox.mirage.example.com
+mirage link create   --name preview   --command 'npm run dev'   --execution-folder "$PWD"   --health-check 'GET http://127.0.0.1:{port}/'   --grace 2m   --ttl 30m
+
+mirage link list --json
+mirage link logs preview --tail 100
+mirage link restart preview
+mirage link delete preview
+mirage space delete "$(jq -r .alias /tmp/mirage-space.json)"
+
+unset MIRAGE_TOKEN
+rm -f /tmp/mirage-space.json
 ```
 
-Example B — suffix pattern (base starts with `-`):
+The `create` response contains the temporary URL. With `base_host: mydomain.com`, a link named `preview` is normally published as `preview-<space>.mydomain.com`.
 
-```text
-DNS: *-mirage.example.com -> 203.0.113.10
-base_host: -mirage.example.com
-result: api-calm-fox-mirage.example.com
-```
+## CLI server and token resolution
 
-Proposed config at `~/.config/mirage/config.yaml`:
-
-```yaml
-base_host: mirage.example.com
-public_address: ":9955"
-private_address: "127.0.0.1:9956"
-data_path: ~/.local/share/mirage/mirage.db
-caddy:
-  admin_url: http://127.0.0.1:2019
-  binary: caddy
-  managed: true
-```
-
-A CLI can address another private server:
+The CLI talks to `http://127.0.0.1:9956` by default. Select another protected endpoint with `--server` or `MIRAGE_SERVER`:
 
 ```sh
 mirage --server http://127.0.0.1:9956 space list
-MIRAGE_SERVER=http://10.0.0.8:9956 mirage space list
-```
-
-## 2. Start the server
-
-Defaults are public port 9955, private port 9956. Management binds to loopback unless config explicitly changes the address.
-
-Example A:
-
-```sh
-mirage start --public 9955 --private 9956
-```
-
-Example B:
-
-```sh
-mirage start --config ./mirage.yaml --public 8080 --private 8081
-```
-
-CLI flags override config. Startup validates DNS-independent configuration, opens libSQL, starts or connects to Caddy, reconciles state, starts cleanup, then reports readiness. `GET http://127.0.0.1:9956/healthz` is unauthenticated and returns process readiness only. `/`, `/dashboard`, and `/api/v1/` are never registered on the public listener.
-
-## 3. Spaces
-
-### Create
-
-Default TTL is 6h; accepted range is 1m–12h. The token is printed once.
-
-Example A:
-
-```sh
-$ mirage space create
-Alias: calm-fox
-Token: mir_6z...Pq
-Expires: 2026-08-12T10:00:00Z
-```
-
-Example B:
-
-```sh
-mirage space create --ttl 45m --json > space.json
-jq -r .token space.json > .mirage_token
-printf '
-.mirage_token
-' >> .gitignore
-chmod 600 .mirage_token
-```
-
-### List or inspect
-
-Example A — all active spaces:
-
-```sh
+export MIRAGE_SERVER=https://mirage-admin.mydomain.com
 mirage space list
 ```
 
-Example B — one alias:
-
-```sh
-mirage space list calm-fox --json
-```
-
-The private server is trusted-local in v1: listing spaces does not reveal tokens or token hashes.
-
-### Delete
-
-Normal deletion requires the space bearer token. `--force` is an administrative bypass and requires a non-empty audit reason; it is accepted only via the private management interface.
-
-Example A:
-
-```sh
-mirage space delete calm-fox --token "$TOKEN"
-```
-
-Example B:
-
-```sh
-mirage space delete calm-fox --force "owner lost token; ticket OPS-42"
-```
-
-Deleting a space removes its routes, terminates its link process groups, then removes/archives its records.
-
-## 4. Token resolution
-
-For link and authenticated space operations, precedence is:
+For space-scoped operations, the token is resolved in this order:
 
 1. `--token VALUE`
 2. `MIRAGE_TOKEN`
-3. exact file `./.mirage_token`
+3. `./.mirage_token` in the exact current directory
 
-Whitespace around a token file is removed. Mirage does not search parent directories in v1. It warns when the file is group/world-readable and never prints the token in logs or process arguments it creates.
-
-Example A:
+For a local token file:
 
 ```sh
-MIRAGE_TOKEN="mir_..." mirage link list
+(umask 077; printf '%s
+' "$MIRAGE_TOKEN" > .mirage_token)
+printf '.mirage_token
+' >> .gitignore
 ```
 
-Example B:
+The CLI warns if the file is group- or world-readable. A space token can manage only links in its own space. `--json` provides machine-readable results.
+
+Mirage executes link commands as the Mirage service user. Only submit trusted commands.
+
+## Spaces
+
+A space is a token-scoped collection of links. The default TTL is six hours; supported TTLs range from one minute to twelve hours.
 
 ```sh
-printf '%s
-' 'mir_...' > .mirage_token
-chmod 600 .mirage_token
+mirage space create --alias demo --ttl 45m
+mirage space list
+mirage space list demo --json
+mirage space delete demo
+```
+
+A new space token is returned once and is stored only as a hash by Mirage. Deleting a space removes its routes and stops its link process groups.
+
+Installation administrators can force-delete a space only with a non-empty audit reason:
+
+```sh
+mirage space delete demo --force 'ticket OPS-42: owner lost token'
+```
+
+See [Administration tokens](admin-token.md) before using global operations.
+
+## Links
+
+Creating a link requires a command, execution folder, and loopback health check. Mirage reserves a port, exports it as `PORT`, and replaces literal `{port}` placeholders in the command and health-check URL.
+
+```sh
+mirage link create   --name api   --command 'go run ./cmd/api --port {port}'   --execution-folder "$PWD"   --health-check 'GET http://127.0.0.1:{port}/healthz'   --grace 30s   --ttl 2h   --restarts
+```
+
+Health-check methods may be `GET`, `HEAD`, or `POST`, and the URL must target loopback. A route is not published until the process is healthy. If startup exceeds the grace period, Mirage stops the process and returns recent startup context.
+
+`--restarts` enables automatic recovery after an unexpected exit or an unhealthy state. The TTL always wins and stops further restarts.
+
+Common operations are:
+
+```sh
 mirage link list
+mirage link logs api --tail 100
+mirage link logs api --follow
+mirage link restart api
+mirage link delete api
 ```
 
-## 5. Create links
+Restarting removes the route, restarts and health-checks the process, and restores the route without extending its TTL. Deletion removes the route before stopping the process.
 
-Required: token, command, execution folder, and health check. Defaults: grace 15s, TTL 6h, random name, no automatic restarts. TTL range is 1m–12h and grace range is 1s–15m.
+## Dashboard and API
 
-Mirage reserves a loopback port, exports it as `PORT`, and replaces literal `{port}` in the command and health-check URL. The command is trusted local input and is executed through the platform shell from the execution folder. A health check has the form `METHOD URL`; supported methods are GET, HEAD, and POST, and URL host must be loopback.
+The private dashboard is available at:
 
-Example A — named Go service:
+```text
+http://127.0.0.1:9956/dashboard
+```
+
+It uses a Mirage token login and a short-lived session. Do not treat the dashboard as safe for public exposure merely because it has a login. If remote access is required, publish it only through a separate identity-protected Zero Trust application as described in the [setup guide](setup.md#zero-trust-deployment-recommended).
+
+The private API is under `/api/v1/`. Supply a space token as a bearer credential:
 
 ```sh
-mirage link create   --token "$TOKEN"   --name api   --command 'go run ./cmd/api --port {port}'   --execution-folder "$PWD"   --health-check 'GET http://127.0.0.1:{port}/healthz'   --grace 30s --ttl 2h --restarts
-# URL: http://api-calm-fox.mirage.example.com:9955 (unless forwarded from 80)
+curl -H "Authorization: Bearer $MIRAGE_TOKEN"   http://127.0.0.1:9956/api/v1/links
 ```
 
-Example B — random name, environment-based port:
+Installation-wide administration is optional and requires `admin.token_hash_file`. With an admin credential, an operator can work across spaces:
 
 ```sh
-MIRAGE_TOKEN="$TOKEN" mirage link create   --command 'npm run dev'   --execution-folder ./web   --health-check 'GET http://localhost:{port}/'   --grace 2m --ttl 30m
+export MIRAGE_ADMIN_TOKEN="$(sudo cat /secure/mirage/admin.token)"
+mirage admin links list demo
+mirage admin links logs demo api --tail 100
+mirage admin links restart demo api --reason 'ticket OPS-42'
+unset MIRAGE_ADMIN_TOKEN
 ```
 
-Creation waits until the service becomes healthy or grace expires. The Caddy route is not added before health succeeds. On failure, Mirage terminates the process and returns a non-zero exit with recent startup logs.
+Never put an admin token in a URL, repository, log, or committed configuration. See the [admin-token runbook](admin-token.md) for initialization, rotation, and incident response.
 
-Names are lowercase DNS labels (`[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?`) and unique within a space.
+## Health, expiry, and recovery
 
-## 6. List links
-
-Example A:
+Check private service readiness with:
 
 ```sh
-mirage link list --token "$TOKEN"
+curl -fsS http://127.0.0.1:9956/healthz
 ```
 
-Example B:
+The public ingress does not serve management routes. On startup and during periodic reconciliation, Mirage expires TTLs, removes stale Mirage routes, stops stale recorded process groups, and restores only active, healthy links.
 
-```sh
-mirage link list --json | jq '.links[] | {name,url,status,expires_at}'
-```
-
-Only links belonging to the token's space are returned.
-
-## 7. Logs
-
-Logs combine stdout and stderr, carry timestamps/stream labels, and are held in a bounded local ring (proposed: latest 10 MiB per link). Tokens are redacted on best effort.
-
-Example A — recent output:
-
-```sh
-mirage link logs api --token "$TOKEN" --tail 100
-```
-
-Example B — follow:
-
-```sh
-mirage link logs web --follow
-```
-
-`--follow` ends when the process terminates or the client disconnects.
-
-## 8. Restart links
-
-A manual restart is allowed regardless of whether automatic `--restarts` was set. It removes the route, stops the process group, starts it again, waits for health, and restores the route without extending TTL.
-
-Example A:
-
-```sh
-mirage link restart api --token "$TOKEN"
-```
-
-Example B:
-
-```sh
-MIRAGE_TOKEN="$TOKEN" mirage link restart web --json
-```
-
-With automatic restarts, unexpected exit or sustained failed health checks trigger exponential backoff (1s to 1m); TTL always wins and stops retries.
-
-## 9. Delete links
-
-Example A:
-
-```sh
-mirage link delete api --token "$TOKEN"
-```
-
-Example B:
-
-```sh
-MIRAGE_TOKEN="$TOKEN" mirage link delete web --json
-```
-
-Deletion is idempotent for an already deleted link, but an unknown name returns not-found. Route removal happens before process termination.
-
-## 10. Dashboard and API
-
-Open `http://127.0.0.1:9956/dashboard`. The HTMX/Tailwind dashboard lists spaces and links, statuses, expiry, URLs, recent logs, and provides restart/delete actions. Destructive administrative actions require typing a reason. In v1 it relies on loopback/private-network isolation rather than browser login, and never displays bearer tokens.
-
-Example API calls:
-
-```sh
-curl http://127.0.0.1:9956/api/v1/spaces
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9956/api/v1/links
-```
-
-Example mutations:
-
-```sh
-curl -X POST http://127.0.0.1:9956/api/v1/spaces   -H 'Content-Type: application/json' -d '{"ttl":"45m"}'
-
-curl -X DELETE http://127.0.0.1:9956/api/v1/links/api   -H "Authorization: Bearer $TOKEN"
-```
-
-API errors use JSON with `code`, `message`, and optional `details`; validation is 400, missing/invalid token 401, cross-space access 404, conflict 409, and internal failure 500.
-
-## 11. Cleanup and recovery
-
-Cleanup runs once at startup and every minute. It expires TTLs, removes Mirage-owned Caddy routes without live records, stops recorded processes that should no longer run, and repairs missing routes only for healthy active links. It never modifies unrelated Caddy configuration.
-
-Example A: after a server crash, restarting `mirage start` reconciles database and Caddy before accepting creates.
-
-Example B: if Caddy was manually edited and a Mirage route disappeared, the next reconciliation restores it only if its link process is alive and healthy.
-
-## Approved decisions
-
-The product owner approved these choices:
-
-1. Host grammar: `base_host: mirage.example.com` means `<link>-<space>.mirage.example.com`; a leading dash means `<link>-<space>-mirage.example.com`.
-2. Public URLs include the configured public port unless external forwarding supplies 80/443; Mirage itself does not manage TLS/DNS in v1.
-3. Mirage starts a child Caddy by default, but can use an external Caddy admin API; it owns only a namespaced route subtree.
-4. Link commands use the platform shell, receive `PORT`, and support `{port}` interpolation.
-5. Token lookup checks only `./.mirage_token`, not parents.
-6. Private management is unauthenticated except bearer-token link/space actions; dashboard administrative force actions require an audit reason.
-7. `--restarts` retries unexpected exits and later health failures with bounded backoff; manual restart never extends TTL.
-8. Logs are bounded to 10 MiB per link and are not preserved indefinitely after deletion.
-9. Space/link TTL ranges are both 1m–12h; grace range is 1s–15m.
-10. The CLI uses `mirage link ...` (not a nested `space link ...`) and the token identifies the space.
-
-## External advertised URLs
-
-Keep Mirage's managed Caddy listener on `public_address: ":9955"` even when a TLS terminator publishes it elsewhere. Configure the advertised endpoint separately (example values are deployment-specific):
-
-```yaml
-base_host: temp.lab.ollem.io
-external_scheme: https
-external_port: 443
-dashboard_ssl: true # only when a trusted TLS terminator fronts the private dashboard
-```
-
-`external_scheme` is `http` or `https` (case-insensitive); with it set, zero/unset `external_port` selects 80 or 443. Without it Mirage retains legacy URL inference from `public_address`. The dashboard login posts its token in the form body, never the query string. A Zero Trust gateway (such as Pangolin) can still issue its own 401 before Mirage sees the request; that is distinct from Mirage's login landing page.
-
-
-
-## Installation administration
-
-Configure `admin.token_hash_file` and follow [admin-token.md](admin-token.md). Admin credentials operate across spaces; ordinary space tokens remain one-space scoped.
+See the [operator runbook](runbook.md) for recovery and shutdown procedures.

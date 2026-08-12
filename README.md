@@ -1,96 +1,114 @@
 # Mirage
 
-Mirage is a single-node manager for temporary local application environments.
-Mirage v1 provides a CLI, private HTTP API and HTMX dashboard backed by
-embedded libSQL. It supervises temporary host processes, health-gates public
-Caddy routes, enforces TTLs, and reconciles state after crashes.
+Mirage is a simple, single-host tool that lets people and automation agents create temporary links for preview environments. It works with any stack or application server that can listen on an assigned port.
 
-## Prerequisites
+Mirage starts a trusted process, assigns it a `PORT`, waits for its loopback health check to pass, and then publishes a temporary URL through Caddy. Each space and link has a TTL. When a link expires or is deleted, Mirage removes its route and stops its process.
 
-[mise](https://mise.jdx.dev/) installs the repository-pinned Go 1.26 toolchain.
-From a clean checkout:
+Typical uses include pull-request previews, agent-built demos, temporary APIs, and short-lived development environments for Go, Node.js, Python, Ruby, or any other server stack.
+
+## How it works
+
+```text
+User or agent
+    |
+    | mirage CLI (private management API)
+    v
+Mirage systemd service
+    |-- starts the application with an assigned PORT
+    |-- waits for a loopback health check
+    |-- creates a Caddy route only after the application is healthy
+    `-- removes the route and process when the TTL expires
+
+*.mydomain.com --> host or Zero Trust gateway --> public listener :9955
+                                                  |
+                                                  `--> healthy preview process
+
+Private management: 127.0.0.1:9956
+                      |-- GET /healthz
+                      |-- /dashboard
+                      `-- /api/v1/
+```
+
+The normal deployment is:
+
+1. Create wildcard DNS such as `*.mydomain.com` for the host or gateway.
+2. Install Mirage and run it as a systemd service on the application host.
+3. Start a server through `mirage link create`.
+4. Use the temporary URL returned after the server becomes healthy.
+
+## Quick start
+
+Follow the [setup guide](docs/setup.md) first. It covers the binary, Caddy, wildcard DNS, configuration, and systemd service.
+
+Verify the private listener:
 
 ```sh
+curl -fsS http://127.0.0.1:9956/healthz
+```
+
+Create a space while protecting the one-time token response:
+
+```sh
+(umask 077; mirage space create --ttl 1h --json > /tmp/mirage-space.json)
+export MIRAGE_TOKEN="$(jq -r .token /tmp/mirage-space.json)"
+```
+
+Start a preview server. This example uses Python, but the command can start any server that uses `$PORT` or an interpolated `{port}`:
+
+```sh
+mirage link create   --name preview   --command 'python3 -m http.server "$PORT" --bind 127.0.0.1'   --execution-folder "$PWD"   --health-check 'GET http://127.0.0.1:{port}/'   --grace 30s   --ttl 30m
+```
+
+Mirage prints the temporary URL after the health check succeeds. See [Using Mirage](docs/usage.md) for logs, restart, deletion, dashboard, API, and agent-oriented workflows.
+
+## Recommended: add Zero Trust
+
+For shared or Internet-connected hosts, place public links—and especially any remote management route—behind a Zero Trust gateway. Cloudflare Zero Trust and Pangolin are common choices. This adds a short provider-specific setup step and provides identity policies, access controls, and better control than directly exposing the host.
+
+The general process is:
+
+1. Create a tunnel or site in the provider and generate its connector installation command.
+2. Install the connector on the Mirage host using the provider's systemd or Docker instructions.
+3. Add a wildcard application or resource for `*.mydomain.com` that targets Mirage's public ingress on port `9955`.
+4. If remote administration is required, add a separate identity-protected management application. Keep port `9956` private and use `GET /healthz` for readiness checks.
+
+Docker in this workflow runs the **Zero Trust connector only**. Running Mirage itself in Docker is not supported in v0.1.0. A containerized connector cannot normally reach host loopback; use the host address and firewall rules recommended by the provider. Never publish port `9956` directly to the Internet.
+
+See [Zero Trust deployment](docs/setup.md#zero-trust-deployment-recommended) for the managed-Caddy and networking details.
+
+## Features
+
+- Temporary, token-scoped spaces and links with bounded TTLs.
+- Host-native processes for previews in any server stack.
+- Health-gated Caddy routing: unhealthy processes are not published.
+- Logs, restart, deletion, and optional automatic restarts.
+- Embedded libSQL state and startup reconciliation after interruptions.
+- Private CLI/API and a daisyUI dashboard.
+- Optional installation-wide administration token.
+- Reproducible Go and frontend toolchains managed through `mise`.
+
+Mirage executes trusted commands as its service user. Access to the management API is equivalent to permission to start commands with that account's privileges.
+
+## Documentation
+
+- [Setup and deployment](docs/setup.md)
+- [Using Mirage](docs/usage.md)
+- [Operator runbook](docs/runbook.md)
+- [Administration tokens](docs/admin-token.md)
+- [Security policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+
+## Development
+
+The repository pins Go 1.26 and its other build tools through [`mise`](https://mise.jdx.dev/):
+
+```sh
+git clone https://github.com/Ollem-io/Mirage-Links.git
+cd Mirage-Links
+mise trust
 mise install
-mise run fmt-check
-mise run test
-mise run coverage
-mise run build
-mise run smoke
+mise run check
+VERSION=v0.1.0 mise run release
 ```
 
-`mise run check` runs the complete bootstrap gate. The built executable is
-`bin/mirage`.
-
-```sh
-bin/mirage --help
-bin/mirage version
-```
-
-A release build may inject its version without changing source:
-
-```sh
-go build -ldflags '-X github.com/primeintellect/mirage/internal/buildinfo.Version=v1.2.3' -o bin/mirage ./cmd/mirage
-bin/mirage version # mirage v1.2.3
-```
-
-## Layout and boundaries
-
-- `internal/domain`: business vocabulary and invariants (introduced in MIR-02)
-- `internal/application`: use cases and ports (introduced in MIR-02)
-- `internal/adapters/inbound`: CLI/HTTP/dashboard delivery adapters
-- `internal/adapters/outbound`: storage, Caddy, process, and health adapters
-- `internal/composition`: executable-only wiring
-- `cmd/mirage`: process entry point
-
-Domain and application packages must not import inbound or outbound adapters.
-`internal/architecture` tests enforce this rule before product code arrives.
-The entry point calls `os.Exit` once; parsing, output, and exit statuses are
-injected and tested without spawning a process.
-
-## Quality policy
-
-`mise run coverage` enforces at least 85% statement coverage for packages with executable Go statements. The sole
-`main` process-exit call is intentionally exercised by the black-box smoke test;
-all injectable bootstrap logic participates in Go coverage. Generated code is
-not checked in and no bootstrap behavior is excluded. `scripts/smoke.sh` provides the clean-temporary-directory
-black-box binary check used by `mise run smoke`.
-
-## Installation and operations
-
-See [the installation guide](docs/setup.md) for the recommended systemd setup,
-DNS, upgrades, and verification. See [the operator runbook](docs/runbook.md) for
-startup, recovery, shutdown, release checksum, and incident procedures.
-
-## Contributing
-
-Run `mise run fmt` before committing, then `mise run check`. Tests must not
-require DNS, privileged ports, Caddy, or a database service. Keep dependencies
-pointing inward: adapters may depend on domain/application ports, while
-composition is the only wiring layer.
-
-## External advertised URLs
-
-Keep Mirage's managed Caddy listener on `public_address: ":9955"` even when a TLS terminator publishes it elsewhere. Configure the advertised endpoint separately (example values are deployment-specific):
-
-```yaml
-base_host: temp.lab.ollem.io
-external_scheme: https
-external_port: 443
-dashboard_ssl: true # only when a trusted TLS terminator fronts the private dashboard
-```
-
-`external_scheme` is `http` or `https` (case-insensitive); with it set, zero/unset `external_port` selects 80 or 443. Without it Mirage retains legacy URL inference from `public_address`. The dashboard login posts its token in the form body, never the query string. A Zero Trust gateway (such as Pangolin) can still issue its own 401 before Mirage sees the request; that is distinct from Mirage's login landing page.
-
-
-## Installation admin token
-
-Optional installation-wide administration is enabled with:
-
-```yaml
-admin:
-  token_hash_file: /etc/mirage/admin-token.sha256
-```
-
-Create credentials offline (both paths are deliberately required):
-`mirage admin init --token-file PATH --hash-file PATH`. The token file is 0600 and hash file is 0640; creation is exclusive and raw credentials are never printed. Use `--admin-token`, `MIRAGE_ADMIN_TOKEN`, or `./.mirage_admin_token` for administrative API/CLI operations, including alias-bound `mirage admin links list|logs|restart|delete`. Administrative service methods fail closed without `admin.token_hash_file`. Legacy unscoped compatibility endpoints are separate; do not expose them in production. See `docs/admin-token.md` for setup, retrieval, rotation, rollback, and incident guidance.
+The project uses hexagonal architecture and enforces at least 85% aggregate Go statement coverage.
