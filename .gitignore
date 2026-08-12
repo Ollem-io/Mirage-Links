@@ -1,0 +1,10 @@
+.mirage_token
+.env
+bin/
+dist/
+coverage.out
+*.db
+*.db-shm
+*.db-wal
+.worktrees/
+node_modules/
