@@ -15,9 +15,10 @@ const (
 	StatusFailed   LinkStatus = "failed"
 )
 
-func (s LinkStatus) Terminal() bool {
-	return s == StatusDeleted || s == StatusExpired || s == StatusFailed
-}
+// Terminal means permanently terminal. Failed is deliberately restartable: a
+// manual or configured automatic restart goes through Starting and must health
+// gate back through Healthy before Active.
+func (s LinkStatus) Terminal() bool { return s == StatusDeleted || s == StatusExpired }
 func (s LinkStatus) CanTransition(to LinkStatus) bool {
 	if s == to {
 		return true
@@ -31,11 +32,13 @@ func (s LinkStatus) CanTransition(to LinkStatus) bool {
 	case StatusStarting:
 		return to == StatusHealthy || to == StatusFailed || to == StatusStopping || to == StatusExpired
 	case StatusHealthy:
-		return to == StatusActive || to == StatusStopping || to == StatusExpired
+		return to == StatusActive || to == StatusFailed || to == StatusStopping || to == StatusExpired
 	case StatusActive:
-		return to == StatusStopping || to == StatusExpired
+		return to == StatusFailed || to == StatusStopping || to == StatusExpired
 	case StatusStopping:
 		return to == StatusDeleted || to == StatusFailed || to == StatusExpired
+	case StatusFailed:
+		return to == StatusStarting || to == StatusStopping || to == StatusDeleted || to == StatusExpired
 	}
 	return false
 }

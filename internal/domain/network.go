@@ -69,9 +69,12 @@ func ParseHealthCheck(s string) (HealthCheck, error) {
 	if h.Method != HealthGET && h.Method != HealthHEAD && h.Method != HealthPOST {
 		return HealthCheck{}, NewValidation("health_check", "unsupported method")
 	}
-	u, e := url.Parse(h.URL)
-	if e != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil {
+	u, e := url.ParseRequestURI(h.URL)
+	if strings.Contains(h.URL, "#") || e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return HealthCheck{}, NewValidation("health_check", "must be an absolute HTTP URL")
+	}
+	if !validAuthority(u) {
+		return HealthCheck{}, NewValidation("health_check", "invalid authority or port")
 	}
 	host := u.Hostname()
 	ip := net.ParseIP(host)
@@ -79,4 +82,46 @@ func ParseHealthCheck(s string) (HealthCheck, error) {
 		return HealthCheck{}, NewValidation("health_check", "host must be loopback")
 	}
 	return h, nil
+}
+
+// validAuthority rejects ambiguous authorities and requires an explicit port to
+// contain only decimal digits in the TCP range.
+func validAuthority(u *url.URL) bool {
+	a := u.Host
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	explicit := false
+	p := ""
+	if strings.HasPrefix(a, "[") {
+		end := strings.LastIndex(a, "]")
+		if end < 1 {
+			return false
+		}
+		rest := a[end+1:]
+		if rest != "" {
+			if !strings.HasPrefix(rest, ":") {
+				return false
+			}
+			explicit = true
+			p = rest[1:]
+		}
+	} else if strings.Count(a, ":") == 1 {
+		_, p, _ = strings.Cut(a, ":")
+		explicit = true
+	}
+	if !explicit {
+		return true
+	}
+	if p == "" {
+		return false
+	}
+	for _, c := range p {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	n, e := strconv.Atoi(p)
+	return e == nil && n >= 1 && n <= 65535
 }

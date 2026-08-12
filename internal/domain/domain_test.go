@@ -157,6 +157,18 @@ func TestTokenParsingAndMarshaling(t *testing.T) {
 	if e != nil || string(b) != `"[redacted]"` {
 		t.Fatalf("%s %v", b, e)
 	}
+	b, e = json.Marshal(tok)
+	if e != nil || string(b) != `"[redacted]"` || contains(string(b), tok.Reveal()) {
+		t.Fatalf("token marshalled unsafely: %s %v", b, e)
+	}
+	wrapped := struct {
+		Credential Token     `json:"credential"`
+		Hash       TokenHash `json:"hash"`
+	}{tok, tok.Hash()}
+	b, _ = json.Marshal(wrapped)
+	if contains(string(b), tok.Reveal()) || contains(string(b), "mir_") {
+		t.Fatalf("nested token leaked: %s", b)
+	}
 }
 func TestBaseHostAndEntityExpiry(t *testing.T) {
 	for _, s := range []string{"", "-", "bad/path", "a..b"} {
@@ -172,5 +184,38 @@ func TestBaseHostAndEntityExpiry(t *testing.T) {
 	}
 	if (SystemClock{}).Now().IsZero() {
 		t.Fatal("clock")
+	}
+}
+
+func TestHealthStrictAuthority(t *testing.T) {
+	for _, s := range []string{
+		"GET http://localhost:/", "GET http://localhost:abc/", "GET http://localhost:0/",
+		"GET http://localhost:65536/", "GET http://user@localhost/", "GET http://localhost/#fragment",
+		"GET http://[::1]:/", "GET http://[::1]:bad/", "GET http://[::1]junk/",
+	} {
+		if _, err := ParseHealthCheck(s); err == nil {
+			t.Errorf("accepted malformed health URL %q", s)
+		}
+	}
+}
+func TestFailureCanRestartButHealthyMustGateActive(t *testing.T) {
+	l := Link{Status: StatusActive}
+	if err := l.Transition(StatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	if l.Status.Terminal() {
+		t.Fatal("failed restart should be possible")
+	}
+	if err := l.Transition(StatusStarting); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Transition(StatusActive); err == nil {
+		t.Fatal("active bypassed health gate")
+	}
+	if err := l.Transition(StatusHealthy); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Transition(StatusActive); err != nil {
+		t.Fatal(err)
 	}
 }
