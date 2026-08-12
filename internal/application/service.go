@@ -142,6 +142,13 @@ func (s *Service) AdminGetSpace(ctx context.Context, token domain.AdminToken, al
 	}
 	return s.GetSpace(ctx, alias)
 }
+func (s *Service) AdminDeleteSpace(ctx context.Context, token domain.AdminToken, in DeleteSpaceInput) error {
+	if err := s.AuthorizeAdmin(ctx, token); err != nil {
+		return err
+	}
+	in.Force = true
+	return s.DeleteSpace(ctx, in)
+}
 
 func (s *Service) authenticate(ctx context.Context, alias domain.Alias, token domain.Token) (domain.Space, error) {
 	sp, err := s.Repo.FindSpaceByAlias(ctx, alias)
@@ -442,6 +449,43 @@ func (s *Service) failStart(ctx context.Context, l domain.Link, p ports.Port, ca
 	}
 	return CreateLinkResult{Link: l, RecentLogs: logs}, fmt.Errorf("link startup failed: %w", cause)
 }
+func (s *Service) AdminListLinks(ctx context.Context, token domain.AdminToken, alias string) ([]domain.Link, error) {
+	if e := s.AuthorizeAdmin(ctx, token); e != nil {
+		return nil, e
+	}
+	a, e := domain.ParseAlias(alias)
+	if e != nil {
+		return nil, e
+	}
+	sp, e := s.Repo.FindSpaceByAlias(ctx, a)
+	if e != nil {
+		return nil, e
+	}
+	return s.Repo.ListLinks(ctx, sp.ID)
+}
+func (s *Service) AdminLogsFor(ctx context.Context, token domain.AdminToken, alias, name string, tail int) ([]ports.LogEntry, error) {
+	if e := s.AuthorizeAdmin(ctx, token); e != nil {
+		return nil, e
+	}
+	a, e := domain.ParseAlias(alias)
+	if e != nil {
+		return nil, e
+	}
+	sp, e := s.Repo.FindSpaceByAlias(ctx, a)
+	if e != nil {
+		return nil, e
+	}
+	n, e := domain.ParseLinkName(name)
+	if e != nil {
+		return nil, e
+	}
+	l, e := s.Repo.FindLink(ctx, sp.ID, n)
+	if e != nil {
+		return nil, e
+	}
+	return s.Logs.Tail(ctx, l.ID, tail)
+}
+
 func (s *Service) ListLinks(ctx context.Context, alias string, token domain.Token) ([]domain.Link, error) {
 	a, e := domain.ParseAlias(alias)
 	if e != nil {

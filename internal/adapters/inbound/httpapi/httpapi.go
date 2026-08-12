@@ -135,6 +135,8 @@ func (a *API) route(w http.ResponseWriter, r *http.Request) {
 		a.spaces(w, r)
 	case len(seg) == 2 && seg[0] == "spaces":
 		a.space(w, r, seg[1])
+	case len(seg) >= 4 && seg[0] == "admin" && seg[1] == "spaces" && seg[3] == "links":
+		a.adminLinks(w, r, seg)
 	case len(seg) == 1 && seg[0] == "links":
 		a.links(w, r)
 	case len(seg) >= 2 && seg[0] == "links":
@@ -256,6 +258,9 @@ type adminService interface {
 	AdminCreateSpace(context.Context, domain.AdminToken, application.CreateSpaceInput) (application.CreateSpaceResult, error)
 	AdminGetSpace(context.Context, domain.AdminToken, string) (domain.Space, error)
 	AuthorizeAdmin(context.Context, domain.AdminToken) error
+	AdminListLinks(context.Context, domain.AdminToken, string) ([]domain.Link, error)
+	AdminLogsFor(context.Context, domain.AdminToken, string, string, int) ([]ports.LogEntry, error)
+	AdminDeleteSpace(context.Context, domain.AdminToken, application.DeleteSpaceInput) error
 }
 
 func adminBearer(r *http.Request) (domain.AdminToken, error) {
@@ -377,14 +382,21 @@ func (a *API) space(w http.ResponseWriter, r *http.Request, alias string) {
 					return
 				}
 			}
+			var e error
 			if in.Force {
-				_, _, ae := a.admin(r)
+				ad, at, ae := a.admin(r)
 				if ae != nil {
 					apiErr(w, ae)
 					return
 				}
+				if ad != nil {
+					e = ad.AdminDeleteSpace(r.Context(), at, application.DeleteSpaceInput{Alias: alias, Force: true, Reason: in.Reason})
+				} else {
+					e = a.service.DeleteSpace(r.Context(), application.DeleteSpaceInput{Alias: alias, Force: true, Reason: in.Reason})
+				}
+			} else {
+				e = a.service.DeleteSpace(r.Context(), application.DeleteSpaceInput{Alias: alias, Token: tok})
 			}
-			e := a.service.DeleteSpace(r.Context(), application.DeleteSpaceInput{Alias: alias, Token: tok, Force: in.Force, Reason: in.Reason})
 			if e != nil {
 				apiErr(w, e)
 				return
@@ -559,4 +571,39 @@ func (a *API) follow(w http.ResponseWriter, r *http.Request, sp domain.Space, t 
 		default:
 		}
 	}
+}
+
+func (a *API) adminLinks(w http.ResponseWriter, r *http.Request, seg []string) {
+	ad, t, e := a.admin(r)
+	if e != nil || ad == nil {
+		if e == nil {
+			e = domain.NewUnauthorized("admin disabled")
+		}
+		apiErr(w, e)
+		return
+	}
+	alias := seg[2]
+	if len(seg) == 4 && r.Method == http.MethodGet {
+		x, e := ad.AdminListLinks(r.Context(), t, alias)
+		if e != nil {
+			apiErr(w, e)
+			return
+		}
+		o := make([]linkOut, len(x))
+		for i := range x {
+			o[i] = outLink(x[i], "")
+		}
+		writeJSON(w, 200, map[string]any{"links": o})
+		return
+	}
+	if len(seg) == 6 && seg[5] == "logs" && r.Method == http.MethodGet {
+		x, e := ad.AdminLogsFor(r.Context(), t, alias, seg[4], 100)
+		if e != nil {
+			apiErr(w, e)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"logs": x})
+		return
+	}
+	method(w)
 }

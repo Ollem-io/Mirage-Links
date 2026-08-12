@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
+	"fmt"
 	"html/template"
 	"io"
 	"mime"
@@ -109,6 +110,36 @@ func (a *API) setDashboardCookies(w http.ResponseWriter, r *http.Request, t doma
 	http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_csrf", Value: base64.RawURLEncoding.EncodeToString(csrf), Path: "/dashboard", SameSite: http.SameSiteStrictMode, Secure: secure})
 }
 
+func (a *API) setAdminDashboardCookies(w http.ResponseWriter, r *http.Request, t domain.AdminToken) {
+	secure := r.TLS != nil || a.dashboardSSL
+	http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_admin", Value: t.Reveal(), Path: "/dashboard", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure, MaxAge: 3600})
+	csrf := make([]byte, 24)
+	if _, err := rand.Read(csrf); err == nil {
+		http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_csrf", Value: base64.RawURLEncoding.EncodeToString(csrf), Path: "/dashboard", SameSite: http.SameSiteStrictMode, Secure: secure, MaxAge: 3600})
+	}
+}
+func (a *API) dashboardAdmin(r *http.Request) (adminService, domain.AdminToken, bool) {
+	c, e := r.Cookie("mirage_dashboard_admin")
+	if e != nil {
+		return nil, "", false
+	}
+	t, e := domain.ParseAdminToken(c.Value)
+	if e != nil {
+		return nil, "", false
+	}
+	ad, ok := a.service.(adminService)
+	if !ok || !ad.AdminConfigured() || ad.AuthorizeAdmin(r.Context(), t) != nil {
+		return nil, "", false
+	}
+	return ad, t, true
+}
+func dashboardLogout(w http.ResponseWriter, r *http.Request) {
+	for _, n := range []string{"mirage_dashboard_token", "mirage_dashboard_admin", "mirage_dashboard_csrf"} {
+		http.SetCookie(w, &http.Cookie{Name: n, Value: "", Path: "/dashboard", MaxAge: -1, HttpOnly: n != "mirage_dashboard_csrf", SameSite: http.SameSiteStrictMode})
+	}
+	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+}
+
 func dashboardLogin(w http.ResponseWriter, invalid bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -116,7 +147,7 @@ func dashboardLogin(w http.ResponseWriter, invalid bool) {
 	if invalid {
 		msg = `<p role="alert">Unauthorized. Please try again.</p>`
 	}
-	_, _ = io.WriteString(w, `<!doctype html><html><head><title>Mirage dashboard</title></head><body><h1>Mirage dashboard</h1>`+msg+`<form method="post" action="/dashboard/session"><label>Space token <input type="password" name="token" autocomplete="current-password" required></label><button type="submit">Open dashboard</button></form></body></html>`)
+	_, _ = io.WriteString(w, `<!doctype html><html><head><title>Mirage dashboard</title></head><body><h1>Mirage dashboard</h1>`+msg+`<form method="post" action="/dashboard/session"><label>Admin or space token <input type="password" name="token" autocomplete="current-password" required></label><button type="submit">Open dashboard</button></form></body></html>`)
 }
 
 func (a *API) dashboardSession(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +160,15 @@ func (a *API) dashboardSession(w http.ResponseWriter, r *http.Request) {
 		dashboardLogin(w, true)
 		return
 	}
-	t, err := domain.ParseToken(r.PostForm.Get("token"))
+	raw := r.PostForm.Get("token")
+	if t, err := domain.ParseAdminToken(raw); err == nil {
+		if ad, ok := a.service.(adminService); ok && ad.AdminConfigured() && ad.AuthorizeAdmin(r.Context(), t) == nil {
+			a.setAdminDashboardCookies(w, r, t)
+			http.Redirect(w, r, "/dashboard/admin", http.StatusSeeOther)
+			return
+		}
+	}
+	t, err := domain.ParseToken(raw)
 	if err != nil {
 		dashboardLogin(w, true)
 		return
@@ -143,6 +182,18 @@ func (a *API) dashboardSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/dashboard/logout" && r.Method == http.MethodPost {
+		if !dashboardCSRF(r) {
+			dashboardForbidden(w)
+			return
+		}
+		dashboardLogout(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/dashboard/admin") {
+		a.dashboardAdminRoute(w, r)
+		return
+	}
 	if r.URL.Path == "/dashboard/session" {
 		a.dashboardSession(w, r)
 		return
@@ -332,3 +383,70 @@ func (a *API) dashboardDeleteSpace(w http.ResponseWriter, r *http.Request, s dom
 // keep net/url in this file's dependency graph as a guard against ever treating
 // a dashboard path component as a URL without escaping it.
 var _ = url.PathEscape
+
+func (a *API) dashboardAdminRoute(w http.ResponseWriter, r *http.Request) {
+	ad, t, ok := a.dashboardAdmin(r)
+	if !ok || !dashboardCSRF(r) {
+		dashboardForbidden(w)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/dashboard/admin")
+	if path == "" || path == "/" {
+		if r.Method != http.MethodGet {
+			dashboardForbidden(w)
+			return
+		}
+		a.renderAdmin(w, r, ad, t, "")
+		return
+	}
+	if path == "/spaces" && r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, int64(a.maxBody))
+		if e := r.ParseForm(); e != nil {
+			dashboardForbidden(w)
+			return
+		}
+		ttl := time.Duration(0)
+		var e error
+		if x := r.FormValue("ttl"); x != "" {
+			ttl, e = time.ParseDuration(x)
+			if e != nil {
+				http.Error(w, "Invalid TTL", 400)
+				return
+			}
+		}
+		x, e := ad.AdminCreateSpace(r.Context(), t, application.CreateSpaceInput{TTL: ttl, Alias: r.FormValue("alias")})
+		if e != nil {
+			http.Error(w, "Create failed", 400)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<p>Created space %s</p><p><strong>Token (shown once):</strong> %s</p>", template.HTMLEscapeString(x.Space.Alias.String()), template.HTMLEscapeString(x.Token.Reveal()))
+		return
+	}
+	const pre = "/spaces/"
+	if strings.HasPrefix(path, pre) && r.Method == http.MethodGet {
+		alias := strings.TrimPrefix(path, pre)
+		sp, e := ad.AdminGetSpace(r.Context(), t, alias)
+		if e != nil {
+			dashboardForbidden(w)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<!doctype html><h1>Admin space %s</h1><p>Expires %s</p><p>Use alias-bound admin API routes to manage links.</p>", template.HTMLEscapeString(sp.Alias.String()), template.HTMLEscapeString(sp.ExpiresAt.Format(time.RFC3339)))
+		return
+	}
+	dashboardForbidden(w)
+}
+func (a *API) renderAdmin(w http.ResponseWriter, r *http.Request, ad adminService, t domain.AdminToken, reveal string) {
+	xs, e := ad.AdminListSpaces(r.Context(), t)
+	if e != nil {
+		dashboardForbidden(w)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	io.WriteString(w, "<!doctype html><html><body><h1>Mirage administration</h1><form method=post action=/dashboard/logout><button>Logout</button></form><h2>Create space</h2><form method=post action=/dashboard/admin/spaces><input name=ttl placeholder=TTL><input name=alias placeholder='optional alias'><button>Create</button></form><h2>Active spaces</h2><ul>")
+	for _, sp := range xs {
+		fmt.Fprintf(w, "<li><a href='/dashboard/admin/spaces/%s'>%s</a></li>", url.PathEscape(sp.Alias.String()), template.HTMLEscapeString(sp.Alias.String()))
+	}
+	io.WriteString(w, "</ul></body></html>")
+}
