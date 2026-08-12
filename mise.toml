@@ -121,3 +121,7 @@ run = '''set -eu
 go test -coverprofile=/tmp/mirage-httpapi.cover ./internal/adapters/inbound/httpapi
 go tool cover -func=/tmp/mirage-httpapi.cover | awk '/^total:/ {gsub(/%/, "", $3); if ($3 < 90) exit 1}'
 '''
+
+[tasks.cli-artifact]
+description = "Run MIR-09 compiled CLI contract artifact"
+run = "./scripts/cli-artifact.sh"

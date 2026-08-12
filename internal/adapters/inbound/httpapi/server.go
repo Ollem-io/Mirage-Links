@@ -25,9 +25,14 @@ func NewServers(privateAddr, publicAddr string, api *API, public http.Handler) *
 }
 func (s *Servers) Serve(privateListener, publicListener net.Listener) {
 	s.api.SetReady(true)
-	s.wg.Add(2)
-	go func() { defer s.wg.Done(); _ = s.Private.Serve(privateListener) }()
-	go func() { defer s.wg.Done(); _ = s.Public.Serve(publicListener) }()
+	if privateListener != nil {
+		s.wg.Add(1)
+		go func() { defer s.wg.Done(); _ = s.Private.Serve(privateListener) }()
+	}
+	if publicListener != nil && s.Public != nil {
+		s.wg.Add(1)
+		go func() { defer s.wg.Done(); _ = s.Public.Serve(publicListener) }()
+	}
 }
 func (s *Servers) Shutdown(ctx context.Context) error {
 	if err := s.api.Drain(ctx); err != nil {
@@ -37,6 +42,9 @@ func (s *Servers) Shutdown(ctx context.Context) error {
 	var first error
 	var mu sync.Mutex
 	for _, srv := range []*http.Server{s.Private, s.Public} {
+		if srv == nil {
+			continue
+		}
 		wg.Add(1)
 		go func(x *http.Server) {
 			defer wg.Done()

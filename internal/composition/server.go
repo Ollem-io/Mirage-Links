@@ -49,3 +49,18 @@ func StartHTTP(cfg ListenerConfig, api *httpapi.API, public http.Handler) (*http
 	return servers, nil
 }
 func ShutdownHTTP(ctx context.Context, servers *httpapi.Servers) error { return servers.Shutdown(ctx) }
+
+// StartPrivateHTTP binds only the private management listener when Caddy owns the public listener.
+func StartPrivateHTTP(address string, api *httpapi.API) (*httpapi.Servers, error) {
+	if address == "" {
+		address = DefaultPrivateAddress
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	servers := httpapi.NewServers(address, "", api, nil)
+	servers.Public = nil
+	servers.Serve(listener, nil)
+	return servers, nil
+}
