@@ -86,7 +86,9 @@ func (a *API) dashboardAuth(w http.ResponseWriter, r *http.Request) (domain.Spac
 	if e != nil {
 		return domain.Space{}, "", false
 	}
-	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+	// Bootstrap a cookie session only from the full page. Fragment requests with
+	// a bearer token must not rotate the CSRF nonce (parallel initial loads race).
+	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") && r.URL.Path == "/dashboard" {
 		a.setDashboardCookies(w, r, t)
 	}
 	return s, t, true
@@ -151,8 +153,18 @@ func dashboardLogout(w http.ResponseWriter, r *http.Request) {
 	for _, n := range []string{"mirage_dashboard_token", "mirage_dashboard_admin", "mirage_dashboard_csrf"} {
 		http.SetCookie(w, &http.Cookie{Name: n, Value: "", Path: "/dashboard", MaxAge: -1, HttpOnly: n != "mirage_dashboard_csrf", SameSite: http.SameSiteStrictMode})
 	}
-	w.Header().Set("HX-Redirect", "/dashboard")
-	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	dashboardRedirect(w, r, "/dashboard")
+}
+
+// HTMX/fetch clients must see HX-Redirect on a 2xx response: fetch follows a
+// 303 before JavaScript can inspect its headers. Non-HX forms retain 303.
+func dashboardRedirect(w http.ResponseWriter, r *http.Request, target string) {
+	w.Header().Set("HX-Redirect", target)
+	if r.Header.Get("HX-Request") == "true" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 func dashboardLogin(w http.ResponseWriter, invalid bool) {
@@ -209,7 +221,26 @@ func (a *API) dashboardSession(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 
+func dashboardNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+}
+
 func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
+	// Assets are the sole cacheable dashboard responses.
+	if r.URL.Path == "/dashboard/assets/dashboard.css" {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = w.Write(dashboardCSS)
+		return
+	}
+	if r.URL.Path == "/dashboard/assets/dashboard.js" {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = w.Write(dashboardJS)
+		return
+	}
+	dashboardNoStore(w)
 	if r.URL.Path == "/dashboard/logout" && r.Method == http.MethodPost {
 		if !dashboardCSRF(r) {
 			dashboardForbidden(w)
@@ -237,18 +268,6 @@ func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
 			dashboardLogin(w, false)
 			return
 		}
-	}
-	if r.URL.Path == "/dashboard/assets/dashboard.css" {
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		_, _ = w.Write(dashboardCSS)
-		return
-	}
-	if r.URL.Path == "/dashboard/assets/dashboard.js" {
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		_, _ = w.Write(dashboardJS)
-		return
 	}
 	s, t, ok := a.dashboardAuth(w, r)
 	if !ok || !dashboardCSRF(r) {
@@ -480,8 +499,7 @@ func (a *API) dashboardAdminRouteInner(w http.ResponseWriter, r *http.Request) {
 			a.dashboardAdminError(w, "Force delete failed.")
 			return
 		}
-		w.Header().Set("HX-Redirect", "/dashboard/admin")
-		http.Redirect(w, r, "/dashboard/admin", http.StatusSeeOther)
+		dashboardRedirect(w, r, "/dashboard/admin")
 		return
 	}
 	if len(bits) >= 3 && bits[1] == "links" {
@@ -512,8 +530,7 @@ func (a *API) dashboardAdminRouteInner(w http.ResponseWriter, r *http.Request) {
 				a.dashboardAdminError(w, "Operation failed.")
 				return
 			}
-			w.Header().Set("HX-Redirect", "/dashboard/admin/spaces/"+url.PathEscape(alias))
-			http.Redirect(w, r, "/dashboard/admin/spaces/"+url.PathEscape(alias), http.StatusSeeOther)
+			dashboardRedirect(w, r, "/dashboard/admin/spaces/"+url.PathEscape(alias))
 			return
 		}
 	}

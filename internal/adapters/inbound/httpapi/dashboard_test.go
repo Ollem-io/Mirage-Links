@@ -467,7 +467,108 @@ func TestAdminHTMXCreateAndLogoutRequireCSRF(t *testing.T) {
 	if w := request("/dashboard/admin/spaces", csrf.Value); w.Code != http.StatusOK || f.creates != 1 {
 		t.Fatalf("create status=%d creates=%d body=%s", w.Code, f.creates, w.Body.String())
 	}
-	if w := request("/dashboard/logout", csrf.Value); w.Code != http.StatusSeeOther || w.Header().Get("HX-Redirect") != "/dashboard" {
+	if w := request("/dashboard/logout", csrf.Value); w.Code != http.StatusNoContent || w.Header().Get("HX-Redirect") != "/dashboard" {
 		t.Fatalf("logout status=%d hx=%q", w.Code, w.Header().Get("HX-Redirect"))
+	}
+}
+
+func TestDashboardHXRedirectsAndNoStore(t *testing.T) {
+	f := fixture()
+	a := New(f, Config{})
+	a.SetReady(true)
+	h := a.Handler()
+	// Dynamic responses, including private fragments, cannot cache credentials or tokens.
+	w := dashboardRequest(h, http.MethodGet, "/dashboard/links", "token")
+	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("fragment cache policy: %d %q", w.Code, w.Header().Get("Cache-Control"))
+	}
+	w = dashboardRequest(h, http.MethodGet, "/dashboard/assets/dashboard.css", "")
+	if got := w.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
+		t.Fatalf("asset cache policy: %q", got)
+	}
+	// A fragment bearer request is deliberately not a session bootstrap, so two
+	// initial fragment loads cannot race by replacing one another's CSRF cookie.
+	w = dashboardRequest(h, http.MethodGet, "/dashboard/links", "token")
+	if len(w.Result().Cookies()) != 0 {
+		t.Fatalf("fragment rotated cookies: %#v", w.Result().Cookies())
+	}
+	w = dashboardRequest(h, http.MethodGet, "/dashboard", "token")
+	if len(w.Result().Cookies()) < 2 || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("page did not bootstrap a non-cacheable session: %#v", w.Result().Cookies())
+	}
+	// HX redirect uses a 2xx response; fetch otherwise consumes the 303 itself.
+	r := httptest.NewRequest(http.MethodPost, "/dashboard/logout", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	r.Header.Set("HX-Request", "true")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent || w.Header().Get("HX-Redirect") != "/dashboard" {
+		t.Fatalf("HX logout: %d %q", w.Code, w.Header().Get("HX-Redirect"))
+	}
+	r = httptest.NewRequest(http.MethodPost, "/dashboard/logout", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/dashboard" {
+		t.Fatalf("ordinary logout: %d %q", w.Code, w.Header().Get("Location"))
+	}
+}
+
+func TestAdminDashboardHXRedirectAndTokenNoStore(t *testing.T) {
+	raw, _ := domain.NewAdminToken()
+	hash := raw.Hash()
+	f := &adminFake{fake: fixture(), hash: &hash}
+	a := New(f, Config{})
+	a.SetReady(true)
+	h := a.Handler()
+	login := httptest.NewRequest(http.MethodPost, "/dashboard/session", strings.NewReader("token="+raw.Reveal()))
+	login.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	lw := httptest.NewRecorder()
+	h.ServeHTTP(lw, login)
+	var session, csrf *http.Cookie
+	for _, c := range lw.Result().Cookies() {
+		if c.Name == "mirage_dashboard_admin" {
+			session = c
+		}
+		if c.Name == "mirage_dashboard_csrf" {
+			csrf = c
+		}
+	}
+	request := func(path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		r.Host = "example.com"
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("Origin", "http://example.com")
+		r.Header.Set("X-Mirage-CSRF", csrf.Value)
+		r.Header.Set("HX-Request", "true")
+		r.AddCookie(session)
+		r.AddCookie(csrf)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	w := request("/dashboard/admin/spaces", "alias=once")
+	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Body.String(), "shown once") {
+		t.Fatalf("one-time token cache: %d %q %s", w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+	}
+	w = request("/dashboard/admin/spaces/calm/links/api/restart", "reason=ticket")
+	if w.Code != http.StatusNoContent || w.Header().Get("HX-Redirect") != "/dashboard/admin/spaces/calm" {
+		t.Fatalf("HX mutation: %d %q", w.Code, w.Header().Get("HX-Redirect"))
+	}
+	w = request("/dashboard/admin/spaces/calm/delete", "reason=ticket")
+	if w.Code != http.StatusNoContent || w.Header().Get("HX-Redirect") != "/dashboard/admin" {
+		t.Fatalf("HX delete: %d %q", w.Code, w.Header().Get("HX-Redirect"))
+	}
+}
+
+func TestDashboardSessionRejectsInvalidMediaType(t *testing.T) {
+	a := New(fixture(), Config{})
+	a.SetReady(true)
+	r := httptest.NewRequest(http.MethodPost, "/dashboard/session", strings.NewReader(`{"token":"not-a-token"}`))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Unauthorized") {
+		t.Fatalf("invalid media response: %d", w.Code)
 	}
 }

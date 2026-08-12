@@ -32,9 +32,11 @@ description = "Rebuild reproducible embedded Tailwind v4 dashboard CSS and rejec
 run = '''set -eu
 D=internal/adapters/inbound/httpapi
 out=$(mktemp)
-trap 'rm -f "$out"' EXIT
-npm ci --ignore-scripts --no-audit --no-fund
-./node_modules/.bin/tailwindcss -i "$D/dashboard.tailwind.css" -o "$out" --minify
+npm_root=$(mktemp -d)
+trap 'rm -f "$out"; rm -rf "$npm_root"' EXIT
+cp package.json package-lock.json "$npm_root"/
+npm ci --prefix "$npm_root" --ignore-scripts --no-audit --no-fund
+"$npm_root/node_modules/.bin/tailwindcss" -i "$D/dashboard.tailwind.css" -o "$out" --minify
 cmp "$out" "$D/dashboard.css"
 grep -q 'tailwindcss v4.1.17' "$D/dashboard.css"'''
 
