@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/primeintellect/mirage/internal/application/compensation"
 	"github.com/primeintellect/mirage/internal/application/ports"
 	"github.com/primeintellect/mirage/internal/domain"
 )
@@ -235,7 +236,11 @@ func (s *Service) CreateLink(ctx context.Context, in CreateLinkInput) (CreateLin
 	if s.IDs == nil || s.Ports == nil || s.Processes == nil || s.Health == nil || s.Proxy == nil {
 		return CreateLinkResult{}, fmt.Errorf("application: lifecycle ports unavailable")
 	}
-	link := domain.Link{ID: s.IDs.NewLinkID(), SpaceID: sp.ID, Name: n, Status: domain.StatusCreating, Command: in.Command, Folder: in.Folder, HealthCheck: in.HealthCheck, Grace: grace, ExpiresAt: s.now().Add(ttl)}
+	expiry := s.now().Add(ttl)
+	if sp.ExpiresAt.Before(expiry) {
+		expiry = sp.ExpiresAt
+	}
+	link := domain.Link{ID: s.IDs.NewLinkID(), SpaceID: sp.ID, Name: n, Status: domain.StatusCreating, Command: in.Command, Folder: in.Folder, HealthCheck: in.HealthCheck, Grace: grace, ExpiresAt: expiry, AutoRestart: in.Restarts}
 	if e = s.Repo.CreateLink(ctx, link); e != nil {
 		return CreateLinkResult{}, e
 	}
@@ -265,13 +270,12 @@ func (s *Service) start(ctx context.Context, sp domain.Space, l domain.Link) (Cr
 	}
 	p, e := s.Ports.Allocate(ctx)
 	if e != nil {
-		return CreateLinkResult{Link: l}, e
+		return s.failStart(ctx, l, ports.Port{}, e)
 	}
 	l.AllocatedPort = p.Number
 	l.Status = domain.StatusStarting
 	if e = s.Repo.SaveLink(ctx, l); e != nil {
-		_ = s.Ports.Release(ctx, p)
-		return CreateLinkResult{Link: l}, e
+		return s.failStart(ctx, l, p, e)
 	}
 	id, e := s.Processes.Start(ctx, ports.StartRequest{LinkID: l.ID, Command: l.Command, Folder: l.Folder, Port: p, Environment: map[string]string{"PORT": fmt.Sprint(p.Number)}})
 	if e != nil {
@@ -279,14 +283,12 @@ func (s *Service) start(ctx context.Context, sp domain.Space, l domain.Link) (Cr
 	}
 	l.ProcessIdentity = id.Value
 	if e = s.Repo.SaveLink(ctx, l); e != nil {
-		_ = s.Processes.Stop(ctx, id, s.stopGrace())
-		_ = s.Ports.Release(ctx, p)
-		return CreateLinkResult{Link: l}, e
+		return s.failStart(ctx, l, p, e)
 	}
 	// A checker is responsible for probing up to its configured grace deadline;
 	// the application never publishes before its success.
 	l.HealthCheck = replacePort(l.HealthCheck, p.Number)
-	if e = s.Health.Check(ctx, l.HealthCheck); e != nil {
+	if e = s.Health.CheckUntil(ctx, l.HealthCheck, minDuration(l.Grace, l.ExpiresAt.Sub(s.now()))); e != nil {
 		return s.failStart(ctx, l, p, e)
 	}
 	if l.Expired(s.now()) {
@@ -322,11 +324,21 @@ func (s *Service) route(sp domain.Space, l domain.Link) ports.Route {
 func (s *Service) failStart(ctx context.Context, l domain.Link, p ports.Port, cause error) (CreateLinkResult, error) {
 	// Compensation order is route -> process -> reservation. Remove is harmless
 	// if no route was ever published, allowing every failure branch one cleanup path.
-	_ = s.Proxy.Remove(ctx, l.ID)
-	if l.ProcessIdentity != "" {
-		_ = s.Processes.Stop(ctx, ports.ProcessIdentity{Value: l.ProcessIdentity}, s.stopGrace())
-	}
-	_ = s.Ports.Release(ctx, p)
+	_ = compensation.Run(ctx, compensation.Steps{
+		RemoveRoute: func(c context.Context) error { return s.Proxy.Remove(c, l.ID) },
+		StopProcess: func(c context.Context) error {
+			if l.ProcessIdentity == "" {
+				return nil
+			}
+			return s.Processes.Stop(c, ports.ProcessIdentity{Value: l.ProcessIdentity}, s.stopGrace())
+		},
+		ReleasePort: func(c context.Context) error {
+			if p.Number == 0 {
+				return nil
+			}
+			return s.Ports.Release(c, p)
+		},
+	})
 	l.Status = domain.StatusFailed
 	l.ProcessIdentity = ""
 	l.AllocatedPort = 0
@@ -407,18 +419,29 @@ func (s *Service) linkAuth(ctx context.Context, in LinkMutationInput) (domain.Sp
 	l, e := s.Repo.FindLink(ctx, sp.ID, n)
 	return sp, l, e
 }
+func (s *Service) compensationSteps(l domain.Link) compensation.Steps {
+	return compensation.Steps{
+		RemoveRoute: func(c context.Context) error { return s.Proxy.Remove(c, l.ID) },
+		StopProcess: func(c context.Context) error {
+			if l.ProcessIdentity == "" {
+				return nil
+			}
+			return s.Processes.Stop(c, ports.ProcessIdentity{Value: l.ProcessIdentity}, s.stopGrace())
+		},
+		ReleasePort: func(c context.Context) error {
+			if l.AllocatedPort == 0 {
+				return nil
+			}
+			return s.Ports.Release(c, ports.Port{Number: l.AllocatedPort, Address: "127.0.0.1"})
+		},
+	}
+}
 func (s *Service) destroy(ctx context.Context, l domain.Link, terminal domain.LinkStatus) error {
 	if c := s.scheduled[l.ID]; c != nil {
 		c()
 		delete(s.scheduled, l.ID)
 	}
-	_ = s.Proxy.Remove(ctx, l.ID)
-	if l.ProcessIdentity != "" {
-		_ = s.Processes.Stop(ctx, ports.ProcessIdentity{Value: l.ProcessIdentity}, s.stopGrace())
-	}
-	if l.AllocatedPort != 0 {
-		_ = s.Ports.Release(ctx, ports.Port{Number: l.AllocatedPort, Address: "127.0.0.1"})
-	}
+	_ = compensation.Run(ctx, s.compensationSteps(l))
 	l.Status = terminal
 	l.ProcessIdentity = ""
 	l.AllocatedPort = 0
@@ -450,13 +473,7 @@ func (s *Service) RestartLink(ctx context.Context, in LinkMutationInput) (Create
 	return s.start(ctx, sp, l)
 }
 func (s *Service) destroyForRestart(ctx context.Context, l domain.Link) error {
-	_ = s.Proxy.Remove(ctx, l.ID)
-	if l.ProcessIdentity != "" {
-		_ = s.Processes.Stop(ctx, ports.ProcessIdentity{Value: l.ProcessIdentity}, s.stopGrace())
-	}
-	if l.AllocatedPort != 0 {
-		_ = s.Ports.Release(ctx, ports.Port{Number: l.AllocatedPort, Address: "127.0.0.1"})
-	}
+	_ = compensation.Run(ctx, s.compensationSteps(l))
 	return nil
 }
 
@@ -468,6 +485,9 @@ func (s *Service) ScheduleAutomaticRestart(ctx context.Context, alias string, to
 	sp, l, e := s.linkAuth(ctx, LinkMutationInput{Alias: alias, Token: token, Name: name})
 	if e != nil {
 		return time.Time{}, e
+	}
+	if !l.AutoRestart {
+		return time.Time{}, domain.NewConflict("automatic restart disabled")
 	}
 	if l.Expired(s.now()) {
 		_ = s.destroy(ctx, l, domain.StatusExpired)
@@ -499,6 +519,12 @@ func (s *Service) ScheduleAutomaticRestart(ctx context.Context, alias string, to
 		s.scheduled[l.ID] = cancel
 	}
 	return at, nil
+}
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 func min(a, b int) int {
 	if a < b {

@@ -495,7 +495,7 @@ func TestUpgradeOriginalV1Fixture(t *testing.T) {
 		t.Fatalf("upgraded legacy row: %#v %v", got, err)
 	}
 	var version int
-	if err = s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 2 {
+	if err = s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != currentSchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	if _, err = s.db.Exec(`DELETE FROM spaces WHERE id='s'`); err != nil {

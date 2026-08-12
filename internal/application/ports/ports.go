@@ -69,7 +69,7 @@ type StartRequest struct {
 }
 type ProcessIdentity struct{ Value string }
 type HealthChecker interface {
-	Check(context.Context, domain.HealthCheck) error
+	CheckUntil(context.Context, domain.HealthCheck, time.Duration) error
 }
 type Proxy interface {
 	Add(context.Context, Route) error

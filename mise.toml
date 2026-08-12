@@ -60,7 +60,7 @@ run = "./scripts/smoke.sh"
 
 [tasks.check]
 description = "Run formatting, tests, coverage, build, and black-box smoke checks"
-depends = ["fmt-check", "lint", "test", "coverage", "coverage-mir05", "build", "smoke"]
+depends = ["fmt-check", "lint", "test", "coverage", "coverage-mir05", "coverage-mir06", "mir06-scenario", "build", "smoke"]
 
 [tasks.test-domain]
 description = "Run domain contract tests"
@@ -85,3 +85,7 @@ run = "./scripts/coverage_mir05.sh"
 [tasks.mir06-scenario]
 description = "Run deterministic MIR-06 application lifecycle trace artifact"
 run = "./scripts/mir06-scenario.sh"
+
+[tasks.coverage-mir06]
+description = "Enforce MIR-06 application coverage"
+run = "./scripts/coverage_mir06.sh"

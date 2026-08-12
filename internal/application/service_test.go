@@ -31,6 +31,8 @@ func (m *mem) CreateSpace(_ context.Context, x domain.Space) error {
 	return nil
 }
 func (m *mem) FindSpace(_ context.Context, id domain.SpaceID) (domain.Space, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, x := range m.spaces {
 		if x.ID == id {
 			return x, nil
@@ -39,6 +41,8 @@ func (m *mem) FindSpace(_ context.Context, id domain.SpaceID) (domain.Space, err
 	return domain.Space{}, domain.NewNotFound("space")
 }
 func (m *mem) FindSpaceByAlias(_ context.Context, a domain.Alias) (domain.Space, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	x, ok := m.spaces[a]
 	if !ok {
 		return x, domain.NewNotFound("space")
@@ -46,6 +50,8 @@ func (m *mem) FindSpaceByAlias(_ context.Context, a domain.Alias) (domain.Space,
 	return x, nil
 }
 func (m *mem) ListSpaces(context.Context) ([]domain.Space, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	r := []domain.Space{}
 	for _, x := range m.spaces {
 		r = append(r, x)
@@ -53,6 +59,8 @@ func (m *mem) ListSpaces(context.Context) ([]domain.Space, error) {
 	return r, nil
 }
 func (m *mem) ActiveSpaces(_ context.Context, n time.Time) ([]domain.Space, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	r := []domain.Space{}
 	for _, x := range m.spaces {
 		if !x.Expired(n) {
@@ -62,6 +70,8 @@ func (m *mem) ActiveSpaces(_ context.Context, n time.Time) ([]domain.Space, erro
 	return r, nil
 }
 func (m *mem) ExpiredSpaces(_ context.Context, n time.Time) ([]domain.Space, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	r := []domain.Space{}
 	for _, x := range m.spaces {
 		if x.Expired(n) {
@@ -71,6 +81,8 @@ func (m *mem) ExpiredSpaces(_ context.Context, n time.Time) ([]domain.Space, err
 	return r, nil
 }
 func (m *mem) DeleteSpace(_ context.Context, id domain.SpaceID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for a, x := range m.spaces {
 		if x.ID == id {
 			delete(m.spaces, a)
@@ -90,6 +102,8 @@ func (m *mem) CreateLink(_ context.Context, x domain.Link) error {
 	return nil
 }
 func (m *mem) FindLink(_ context.Context, s domain.SpaceID, n domain.LinkName) (domain.Link, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, x := range m.links {
 		if x.SpaceID == s && x.Name == n {
 			return x, nil
@@ -98,6 +112,8 @@ func (m *mem) FindLink(_ context.Context, s domain.SpaceID, n domain.LinkName) (
 	return domain.Link{}, domain.NewNotFound("link")
 }
 func (m *mem) ListLinks(_ context.Context, s domain.SpaceID) ([]domain.Link, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	r := []domain.Link{}
 	for _, x := range m.links {
 		if x.SpaceID == s {
@@ -107,6 +123,8 @@ func (m *mem) ListLinks(_ context.Context, s domain.SpaceID) ([]domain.Link, err
 	return r, nil
 }
 func (m *mem) SaveLink(_ context.Context, x domain.Link) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, ok := m.links[x.ID]; !ok {
 		return domain.NewNotFound("link")
 	}
@@ -114,6 +132,8 @@ func (m *mem) SaveLink(_ context.Context, x domain.Link) error {
 	return nil
 }
 func (m *mem) ExpiredLinks(_ context.Context, n time.Time) ([]domain.Link, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	r := []domain.Link{}
 	for _, x := range m.links {
 		if x.Expired(n) {
@@ -124,6 +144,8 @@ func (m *mem) ExpiredLinks(_ context.Context, n time.Time) ([]domain.Link, error
 }
 func (m *mem) ReconciliationLinks(context.Context, time.Time) ([]domain.Link, error) { return nil, nil }
 func (m *mem) DeleteLink(_ context.Context, id domain.LinkID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, ok := m.links[id]; !ok {
 		return domain.NewNotFound("link")
 	}
@@ -170,7 +192,7 @@ func (f *fake) Stop(context.Context, ports.ProcessIdentity, time.Duration) error
 	return nil
 }
 func (f *fake) Alive(context.Context, ports.ProcessIdentity) (bool, error) { return true, nil }
-func (f *fake) Check(context.Context, domain.HealthCheck) error {
+func (f *fake) CheckUntil(_ context.Context, _ domain.HealthCheck, grace time.Duration) error {
 	f.events = append(f.events, "health")
 	if f.fail == "health" {
 		return errors.New("x")
@@ -222,7 +244,7 @@ func setup(t *testing.T) (*Service, *fake, domain.Token) {
 	return s, f, r.Token
 }
 func input(tok domain.Token) CreateLinkInput {
-	return CreateLinkInput{Alias: "calm-fox", Token: tok, Name: "api", Command: "x {port}", Folder: ".", HealthCheck: domain.HealthCheck{Method: domain.HealthGET, URL: "http://127.0.0.1:{port}/"}}
+	return CreateLinkInput{Restarts: true, Alias: "calm-fox", Token: tok, Name: "api", Command: "x {port}", Folder: ".", HealthCheck: domain.HealthCheck{Method: domain.HealthGET, URL: "http://127.0.0.1:{port}/"}}
 }
 func TestLifecycleOrderingAndCompensation(t *testing.T) {
 	for _, fail := range []string{"", "port", "start", "health", "add"} {

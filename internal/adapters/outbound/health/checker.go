@@ -18,10 +18,7 @@ import (
 type Checker struct{ Client *http.Client }
 
 func New(timeout time.Duration) *Checker {
-	if timeout <= 0 {
-		timeout = 2 * time.Second
-	}
-	c := &http.Client{Timeout: timeout}
+	c := &http.Client{Timeout: probeTimeout(timeout)}
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if !loopback(req.URL) {
 			return fmt.Errorf("health redirect leaves loopback")
@@ -29,6 +26,12 @@ func New(timeout time.Duration) *Checker {
 		return nil
 	}
 	return &Checker{Client: c}
+}
+func probeTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 2 * time.Second
+	}
+	return d
 }
 func loopback(u *url.URL) bool {
 	h := u.Hostname()
@@ -76,10 +79,8 @@ func (c *Checker) Check(ctx context.Context, h domain.HealthCheck) error { // Re
 }
 
 // CheckUntil probes until healthy, context cancellation, or grace elapsed.
-func (c *Checker) CheckUntil(ctx context.Context, h domain.HealthCheck, grace, interval time.Duration) error {
-	if interval <= 0 {
-		interval = 100 * time.Millisecond
-	}
+func (c *Checker) CheckUntil(ctx context.Context, h domain.HealthCheck, grace time.Duration) error {
+	interval := 100 * time.Millisecond
 	deadline := time.NewTimer(grace)
 	defer deadline.Stop()
 	for {
