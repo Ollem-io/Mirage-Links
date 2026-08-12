@@ -674,32 +674,10 @@ func (s *Service) rescheduleFailed(ctx context.Context, sp domain.Space, l domai
 	}
 }
 
-// Cleanup gives TTL priority over all other desired state.
+// Cleanup gives TTL priority over all desired state. Reconciliation adds
+// process/route repair after this expiry pass.
 func (s *Service) Cleanup(ctx context.Context) error {
 	s.lock()
 	defer s.unlock()
-	now := s.now()
-	links, e := s.Repo.ExpiredLinks(ctx, now)
-	if e != nil {
-		return e
-	}
-	for _, l := range links {
-		if e = s.destroy(ctx, l, domain.StatusExpired); e != nil && !domain.IsKind(e, domain.NotFound) {
-			return e
-		}
-	}
-	spaces, e := s.Repo.ExpiredSpaces(ctx, now)
-	if e != nil {
-		return e
-	}
-	for _, sp := range spaces {
-		ls, _ := s.Repo.ListLinks(ctx, sp.ID)
-		for _, l := range ls {
-			_ = s.destroy(ctx, l, domain.StatusExpired)
-		}
-		if e = s.Repo.DeleteSpace(ctx, sp.ID); e != nil {
-			return e
-		}
-	}
-	return nil
+	return s.cleanupLocked(ctx)
 }

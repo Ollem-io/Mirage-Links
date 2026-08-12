@@ -432,3 +432,33 @@ func TestListenerOwnershipHelpers(t *testing.T) {
 		t.Fatal("bad identity")
 	}
 }
+
+func TestRecoveredIdentityStopAndAlive(t *testing.T) {
+	oldAlive, oldWait, oldKill := groupAliveCall, waitGroupCall, killGroupCall
+	defer func() { groupAliveCall, waitGroupCall, killGroupCall = oldAlive, oldWait, oldKill }()
+	s := NewSupervisor(nil)
+	groupAliveCall = func(int) bool { return false }
+	if err := s.Stop(context.Background(), ports.ProcessIdentity{Value: "321:1"}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	alive, err := s.Alive(context.Background(), ports.ProcessIdentity{Value: "bad"})
+	if err != nil || alive {
+		t.Fatalf("%v %v", alive, err)
+	}
+	calls := 0
+	groupAliveCall = func(int) bool { return true }
+	waitGroupCall = func(context.Context, int, time.Duration) bool { calls++; return calls > 1 }
+	killed := 0
+	killGroupCall = func(int, syscall.Signal) { killed++ }
+	if err := s.Stop(context.Background(), ports.ProcessIdentity{Value: "321:1"}, -1); err != nil {
+		t.Fatal(err)
+	}
+	if killed != 2 || calls != 2 {
+		t.Fatalf("kill=%d wait=%d", killed, calls)
+	}
+	groupAliveCall = func(int) bool { return true }
+	alive, err = s.Alive(context.Background(), ports.ProcessIdentity{Value: "321:1"})
+	if err != nil || !alive {
+		t.Fatalf("%v %v", alive, err)
+	}
+}

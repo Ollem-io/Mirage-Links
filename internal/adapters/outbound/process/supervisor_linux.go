@@ -136,8 +136,34 @@ var (
 
 func (s *Supervisor) Stop(ctx context.Context, id ports.ProcessIdentity, grace time.Duration) error {
 	r := s.find(id)
+	// After a Mirage crash the new supervisor has no in-memory run record, but
+	// SQLite retains the process-group leader identity.  Recover that group so
+	// stale recorded children do not survive a restart. IDs are generated only
+	// from a positive PID plus generation by Start.
 	if r == nil {
-		return nil
+		pidPart := strings.Split(id.Value, ":")[0]
+		pgid, err := strconv.Atoi(pidPart)
+		if err != nil || pgid <= 1 {
+			return nil
+		}
+		if !groupAliveCall(pgid) {
+			return nil
+		}
+		if grace < 0 {
+			grace = 0
+		}
+		killGroupCall(pgid, syscall.SIGTERM)
+		if waitGroupCall(ctx, pgid, grace) {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		killGroupCall(pgid, syscall.SIGKILL)
+		if waitGroupCall(ctx, pgid, time.Second) {
+			return nil
+		}
+		return fmt.Errorf("recovered process group %d survived SIGKILL", pgid)
 	}
 	if grace < 0 {
 		grace = 0
@@ -199,7 +225,9 @@ func (s *Supervisor) Alive(ctx context.Context, id ports.ProcessIdentity) (bool,
 	}
 	r := s.find(id)
 	if r == nil {
-		return false, nil
+		pidPart := strings.Split(id.Value, ":")[0]
+		pgid, err := strconv.Atoi(pidPart)
+		return err == nil && pgid > 1 && groupAliveCall(pgid), nil
 	}
 	select {
 	case <-r.done:

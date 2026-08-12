@@ -125,3 +125,33 @@ go tool cover -func=/tmp/mirage-httpapi.cover | awk '/^total:/ {gsub(/%/, "", $3
 [tasks.cli-artifact]
 description = "Run MIR-09 compiled CLI contract artifact"
 run = "./scripts/cli-artifact.sh"
+
+[tasks.release]
+description = "Build a checksummed, clean-directory release candidate"
+run = "./scripts/release.sh"
+
+[tasks.e2e-release]
+description = "Run MIR-10 release-candidate end-to-end harness"
+run = "./scripts/e2e-release.sh"
+
+[tasks.ci]
+description = "MIR-10 release gate: sequential artifacts, race, coverage and release smoke"
+run = """set -eu
+mise run fmt-check
+mise run lint
+mise run test-race
+mise run coverage
+mise run coverage-mir05
+mise run coverage-mir06
+mise run coverage-mir07
+mise run coverage-mir08
+mise run test-libsql
+mise run caddy-integration
+mise run process-artifact
+mise run api-conformance
+mise run dashboard-artifact
+mise run cli-artifact
+mise run mir06-scenario
+mise run assets
+mise run release
+"""

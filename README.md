@@ -57,6 +57,9 @@ all injectable bootstrap logic participates in Go coverage. Generated code is
 not checked in and no bootstrap behavior is excluded. `scripts/smoke.sh` provides the clean-temporary-directory
 black-box binary check used by `mise run smoke`.
 
+## Operations
+See [the operator runbook](docs/runbook.md) for startup, recovery, shutdown, release checksum and incident procedures.
+
 ## Contributing
 
 Run `mise run fmt` before committing, then `mise run check`. Tests must not
