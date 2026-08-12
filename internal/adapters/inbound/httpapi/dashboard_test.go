@@ -30,7 +30,7 @@ func TestDashboardPrivateFragmentsAndEscaping(t *testing.T) {
 	a := New(f, Config{})
 	a.SetReady(true)
 	h := a.Handler()
-	if w := dashboardRequest(h, "GET", "/dashboard", ""); w.Code != http.StatusNotFound {
+	if w := dashboardRequest(h, "GET", "/dashboard", ""); w.Code != http.StatusOK {
 		t.Fatalf("anonymous dashboard=%d", w.Code)
 	}
 	w := dashboardRequest(h, "GET", "/dashboard", "token")
@@ -265,5 +265,37 @@ func TestDashboardRejectsCrossSpaceMutationsWithoutSideEffects(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusNoContent || len(f.deleted) != 1 || f.deleted[0].Alias != "calm" || f.deleted[0].Reason != "operator cleanup" {
 		t.Fatalf("own-space delete status=%d calls=%#v", w.Code, f.deleted)
+	}
+}
+
+func TestDashboardAnonymousLoginSessionAndTrustedSSL(t *testing.T) {
+	f := fixture()
+	token, _ := domain.NewToken()
+	f.space.TokenHash = token.Hash()
+	a := New(f, Config{DashboardSSL: true})
+	a.SetReady(true)
+	h := a.Handler()
+	w := dashboardRequest(h, "GET", "/dashboard", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `action="/dashboard/session"`) {
+		t.Fatalf("landing %d %s", w.Code, w.Body.String())
+	}
+	r := httptest.NewRequest(http.MethodPost, "/dashboard/session", strings.NewReader("token="+token.Reveal()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/dashboard" {
+		t.Fatalf("login %d", w.Code)
+	}
+	for _, c := range w.Result().Cookies() {
+		if !c.Secure {
+			t.Fatalf("cookie %s not Secure", c.Name)
+		}
+	}
+	r = httptest.NewRequest(http.MethodPost, "/dashboard/session", strings.NewReader("token=not-a-token"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Unauthorized") || strings.Contains(w.Body.String(), "not-a-token") {
+		t.Fatalf("invalid %d %s", w.Code, w.Body.String())
 	}
 }

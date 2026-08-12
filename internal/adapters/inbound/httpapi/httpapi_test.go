@@ -97,7 +97,7 @@ func TestAPIConformance(t *testing.T) {
 		auth               bool
 		want               int
 	}{
-		{"GET", "/healthz", "", false, 200}, {"GET", "/api/v1/spaces", "", false, 200}, {"POST", "/api/v1/spaces", `{"ttl":"45m"}`, false, 201}, {"POST", "/api/v1/spaces", `{"ttl":"no"}`, false, 400}, {"POST", "/api/v1/spaces", "", false, 415}, {"GET", "/api/v1/links", "", false, 401}, {"GET", "/api/v1/links", "", true, 200}, {"POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"GET http://127.0.0.1:8/"}`, true, 201}, {"GET", "/api/v1/links/api/logs?tail=-1", "", true, 400}, {"GET", "/api/v1/links/api/logs", "", true, 200}, {"GET", "/api/v1/links/api/logs?follow=true", "", true, 200}, {"POST", "/api/v1/links/api/restart", "", true, 200}, {"DELETE", "/api/v1/links/api", "", true, 204}, {"GET", "/dashboard", "", false, 404}}
+		{"GET", "/healthz", "", false, 200}, {"GET", "/api/v1/spaces", "", false, 200}, {"POST", "/api/v1/spaces", `{"ttl":"45m"}`, false, 201}, {"POST", "/api/v1/spaces", `{"ttl":"no"}`, false, 400}, {"POST", "/api/v1/spaces", "", false, 415}, {"GET", "/api/v1/links", "", false, 401}, {"GET", "/api/v1/links", "", true, 200}, {"POST", "/api/v1/links", `{"name":"api","command":"x","execution_folder":".","health_check":"GET http://127.0.0.1:8/"}`, true, 201}, {"GET", "/api/v1/links/api/logs?tail=-1", "", true, 400}, {"GET", "/api/v1/links/api/logs", "", true, 200}, {"GET", "/api/v1/links/api/logs?follow=true", "", true, 200}, {"POST", "/api/v1/links/api/restart", "", true, 200}, {"DELETE", "/api/v1/links/api", "", true, 204}, {"GET", "/dashboard", "", false, 200}}
 	for _, x := range cases {
 		w := request(h, x.method, x.path, x.body, x.auth)
 		if w.Code != x.want {

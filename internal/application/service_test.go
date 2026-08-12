@@ -356,3 +356,23 @@ func TestBackoffAndExpiry(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestAdvertisedURLUsesExternalConfiguration(t *testing.T) {
+	s := &Service{}
+	s.BaseHost, _ = domain.ParseBaseHost("temp.lab.ollem.io")
+	s.PublicPort = 9955
+	n, _ := domain.ParseLinkName("api")
+	a, _ := domain.ParseAlias("calm")
+	s.ExternalScheme, s.ExternalPort = "https", 443
+	if got, _ := s.AdvertisedURL(n, a); got != "https://api-calm.temp.lab.ollem.io" {
+		t.Fatal(got)
+	}
+	s.ExternalPort = 8443
+	if got, _ := s.AdvertisedURL(n, a); got != "https://api-calm.temp.lab.ollem.io:8443" {
+		t.Fatal(got)
+	}
+	s.ExternalScheme, s.ExternalPort = "", 0
+	if got, _ := s.AdvertisedURL(n, a); got != "http://api-calm.temp.lab.ollem.io:9955" {
+		t.Fatal(got)
+	}
+}

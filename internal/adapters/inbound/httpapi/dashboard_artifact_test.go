@@ -111,7 +111,7 @@ func TestDashboardRunningListenerArtifact(t *testing.T) {
 		}
 	}
 	status, _, _ := do(http.MethodGet, privateURL+"/dashboard", "", nil)
-	if status != http.StatusNotFound {
+	if status != http.StatusOK {
 		t.Fatalf("anonymous dashboard=%d", status)
 	}
 

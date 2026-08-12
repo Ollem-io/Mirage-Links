@@ -235,3 +235,21 @@ func TestHealthCheckAllowsPortPlaceholder(t *testing.T) {
 		t.Fatalf("URL = %q", h.URL)
 	}
 }
+
+func TestPublicURLWithSchemeMatrix(t *testing.T) {
+	b, _ := ParseBaseHost("temp.lab.ollem.io")
+	n, _ := ParseLinkName("api")
+	a, _ := ParseAlias("calm")
+	for _, tc := range []struct {
+		scheme string
+		port   int
+		want   string
+	}{
+		{"https", 443, "https://api-calm.temp.lab.ollem.io"}, {"https", 8443, "https://api-calm.temp.lab.ollem.io:8443"}, {"http", 80, "http://api-calm.temp.lab.ollem.io"}, {"http", 9955, "http://api-calm.temp.lab.ollem.io:9955"},
+	} {
+		got, err := PublicURLWithScheme(b, n, a, tc.scheme, tc.port)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s:%d = %q, %v", tc.scheme, tc.port, got, err)
+		}
+	}
+}

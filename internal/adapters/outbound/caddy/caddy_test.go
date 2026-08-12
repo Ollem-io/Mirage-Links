@@ -387,3 +387,29 @@ func TestReconcileReportsRollbackIncompleteDistinctly(t *testing.T) {
 		t.Fatalf("want distinct rollback-incomplete error, got %v", err)
 	}
 }
+
+func TestAddAndReconcileInsertBeforeFallback(t *testing.T) {
+	f, c := setup(t)
+	keep := json.RawMessage(`{"@id":"other","x":{"kept":true}}`)
+	fallback := json.RawMessage(`{"@id":"mirage-fallback","handle":[{"handler":"static_response"}]}`)
+	f.routes = []json.RawMessage{keep, fallback}
+	if err := c.Add(context.Background(), route("one", "a.example", "127.0.0.1:1")); err != nil {
+		t.Fatal(err)
+	}
+	if string(f.routes[0]) != string(keep) {
+		t.Fatal("unrelated route changed")
+	}
+	if decoded(t, f)[1].ID != "mirage-route-one" || decoded(t, f)[2].ID != FallbackID {
+		t.Fatalf("bad order %#v", decoded(t, f))
+	}
+	if err := c.Reconcile(context.Background(), []ports.Route{route("two", "b.example", "127.0.0.1:2")}); err != nil {
+		t.Fatal(err)
+	}
+	got := decoded(t, f)
+	if got[len(got)-1].ID != FallbackID || got[len(got)-2].ID != "mirage-route-two" {
+		t.Fatalf("reconcile order %#v", got)
+	}
+	if string(f.routes[0]) != string(keep) {
+		t.Fatal("unrelated bytes changed")
+	}
+}

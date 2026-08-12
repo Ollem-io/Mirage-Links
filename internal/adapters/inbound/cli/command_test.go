@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,5 +67,29 @@ func TestExecuteFailures(t *testing.T) {
 				t.Fatalf("stderr = %q, want diagnostic and help hint", stderr.String())
 			}
 		})
+	}
+}
+
+func TestLoadConfigExternalAdvertisement(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "config.yaml")
+	if err := os.WriteFile(p, []byte("base_host: temp.lab.ollem.io\nexternal_scheme: HTTPS\nexternal_port: 8443\ndashboard_ssl: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadConfig(p, func(string) string { return "" }, os.Getwd)
+	if err != nil || c.ExternalScheme != "https" || c.ExternalPort != 8443 || !c.DashboardSSL {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if err := os.WriteFile(p, []byte("external_scheme: ftp\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = loadConfig(p, func(string) string { return "" }, os.Getwd); err == nil {
+		t.Fatal("accepted scheme")
+	}
+	if err := os.WriteFile(p, []byte("external_port: 65536\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = loadConfig(p, func(string) string { return "" }, os.Getwd); err == nil {
+		t.Fatal("accepted port")
 	}
 }

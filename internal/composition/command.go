@@ -117,7 +117,8 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 			binary = "caddy"
 		}
 		configPath := filepath.Join(filepath.Dir(o.DataPath), "mirage-caddy.json")
-		cfg := fmt.Sprintf(`{"admin":{"listen":%q},"apps":{"http":{"servers":{"srv0":{"listen":[%q],"automatic_https":{"disable":true},"routes":[]}}}}}`, adminListen, o.PublicAddress)
+		fallback := `{"@id":"mirage-fallback","handle":[{"handler":"static_response","status_code":404,"headers":{"Content-Type":["text/html; charset=utf-8"]},"body":"<!doctype html><html><body>Link invalid or expired</body></html>"}],"terminal":true}`
+		cfg := fmt.Sprintf(`{"admin":{"listen":%q},"apps":{"http":{"servers":{"srv0":{"listen":[%q],"automatic_https":{"disable":true},"routes":[%s]}}}}}`, adminListen, o.PublicAddress, fallback)
 		if e = os.WriteFile(configPath, []byte(cfg), 0600); e != nil {
 			store.Close()
 			return nil, e
@@ -128,7 +129,7 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 			return nil, e
 		}
 	}
-	svc := &application.Service{Repo: store, Clock: clock{}, IDs: ids{}, Aliases: aliases{}, Tokens: tokens{}, Hashes: hashes{}, Ports: process.NewAllocator(), Processes: sup, Health: health.New(2 * time.Second), Proxy: proxy, Logs: logStore, Audit: store, BaseHost: base, PublicPort: portNumber(o.PublicAddress)}
+	svc := &application.Service{Repo: store, Clock: clock{}, IDs: ids{}, Aliases: aliases{}, Tokens: tokens{}, Hashes: hashes{}, Ports: process.NewAllocator(), Processes: sup, Health: health.New(2 * time.Second), Proxy: proxy, Logs: logStore, Audit: store, BaseHost: base, PublicPort: portNumber(o.PublicAddress), ExternalScheme: o.ExternalScheme, ExternalPort: o.ExternalPort}
 	// Reconciliation is the readiness gate: no private listener (and hence no mutation) is admitted until state is repaired.
 	if e = svc.Reconcile(ctx); e != nil {
 		if child != nil {
@@ -152,12 +153,12 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 			}
 		}
 	}()
-	api := NewHTTPAPI(svc)
+	api := httpapi.New(svc, httpapi.Config{DashboardSSL: o.DashboardSSL})
 	var servers *httpapi.Servers
 	if managed {
 		servers, e = StartPrivateHTTP(o.PrivateAddress, api)
 	} else {
-		servers, e = StartHTTP(ListenerConfig{PublicAddress: o.PublicAddress, PrivateAddress: o.PrivateAddress}, api, http.NotFoundHandler())
+		servers, e = StartHTTP(ListenerConfig{PublicAddress: o.PublicAddress, PrivateAddress: o.PrivateAddress}, api, invalidLinkHandler())
 	}
 	if e != nil {
 		cleanupCancel()
@@ -231,3 +232,11 @@ func portNumber(addr string) int {
 	return n
 }
 func netSplit(a string) (string, string, error) { return net.SplitHostPort(a) }
+
+func invalidLinkHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprint(w, "<!doctype html><html><body>Link invalid or expired</body></html>")
+	})
+}

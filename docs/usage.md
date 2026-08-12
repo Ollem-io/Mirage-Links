@@ -283,3 +283,17 @@ The product owner approved these choices:
 8. Logs are bounded to 10 MiB per link and are not preserved indefinitely after deletion.
 9. Space/link TTL ranges are both 1m–12h; grace range is 1s–15m.
 10. The CLI uses `mirage link ...` (not a nested `space link ...`) and the token identifies the space.
+
+## External advertised URLs
+
+Keep Mirage's managed Caddy listener on `public_address: ":9955"` even when a TLS terminator publishes it elsewhere. Configure the advertised endpoint separately (example values are deployment-specific):
+
+```yaml
+base_host: temp.lab.ollem.io
+external_scheme: https
+external_port: 443
+dashboard_ssl: true # only when a trusted TLS terminator fronts the private dashboard
+```
+
+`external_scheme` is `http` or `https` (case-insensitive); with it set, zero/unset `external_port` selects 80 or 443. Without it Mirage retains legacy URL inference from `public_address`. The dashboard login posts its token in the form body, never the query string. A Zero Trust gateway (such as Pangolin) can still issue its own 401 before Mirage sees the request; that is distinct from Mirage's login landing page.
+

@@ -34,3 +34,17 @@ inspect the link command/process group and Caddy admin endpoint before retrying.
 integration and hermetic release smoke. `dist/checksums.txt` is the SHA-256
 manifest to retain alongside the binary. Never put bearer tokens in shell
 history/logs; use `MIRAGE_TOKEN` or a mode-0600 exact `./.mirage_token`.
+
+## External advertised URLs
+
+Keep Mirage's managed Caddy listener on `public_address: ":9955"` even when a TLS terminator publishes it elsewhere. Configure the advertised endpoint separately (example values are deployment-specific):
+
+```yaml
+base_host: temp.lab.ollem.io
+external_scheme: https
+external_port: 443
+dashboard_ssl: true # only when a trusted TLS terminator fronts the private dashboard
+```
+
+`external_scheme` is `http` or `https` (case-insensitive); with it set, zero/unset `external_port` selects 80 or 443. Without it Mirage retains legacy URL inference from `public_address`. The dashboard login posts its token in the form body, never the query string. A Zero Trust gateway (such as Pangolin) can still issue its own 401 before Mirage sees the request; that is distinct from Mirage's login landing page.
+

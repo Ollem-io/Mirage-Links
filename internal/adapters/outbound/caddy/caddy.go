@@ -27,6 +27,10 @@ import (
 const Namespace = "mirage-route-"
 const defaultServer = "srv0"
 
+// FallbackID is the fixed final route seeded for a managed public listener.
+// It is intentionally not an owned link route.
+const FallbackID = "mirage-fallback"
+
 // ErrorKind allows callers to make safe retry and HTTP mapping decisions
 // without parsing an Admin API response.
 type ErrorKind string
@@ -175,6 +179,15 @@ func (c *Client) routesPath() string {
 	return "/config/apps/http/servers/" + url.PathEscape(c.server) + "/routes"
 }
 
+func fallbackIndex(routes []caddyRoute) int {
+	for i, route := range routes {
+		if route.ID == FallbackID {
+			return i
+		}
+	}
+	return len(routes)
+}
+
 // Add upserts one owned route. A matching existing route makes no Admin write.
 func (c *Client) Add(ctx context.Context, wanted ports.Route) error {
 	if err := validRoute(wanted); err != nil {
@@ -195,7 +208,9 @@ func (c *Client) Add(ctx context.Context, wanted ports.Route) error {
 			return c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(i), encode(wanted))
 		}
 	}
-	return c.write(ctx, http.MethodPost, c.routesPath(), encode(wanted))
+	// A fixed fallback must remain last: insert a new Mirage route immediately
+	// before it, without rewriting unrelated route objects.
+	return c.write(ctx, http.MethodPost, c.routesPath()+"/"+strconv.Itoa(fallbackIndex(all)), encode(wanted))
 }
 
 // Remove deletes exactly one owned route. Unknown or already removed routes are harmless.
@@ -345,13 +360,17 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 			}
 			return nil
 		}})
-		if err := mutate(http.MethodPost, c.routesPath(), encode(added)); err != nil {
+		index := fallbackIndex(all)
+		if err := mutate(http.MethodPost, c.routesPath()+"/"+strconv.Itoa(index), encode(added)); err != nil {
 			return rollback(err)
 		}
+		all = append(all, caddyRoute{})
+		copy(all[index+1:], all[index:])
+		all[index] = encode(added)
 	}
 	// Finally remove orphans from highest to lowest index. The inverse POST to
 	// an array index inserts the exact saved object back at that index.
-	for i := len(all) - 1; i >= 0; i-- {
+	for i := len(original) - 1; i >= 0; i-- {
 		existing := all[i]
 		before := original[i]
 		if !owned(existing.ID) {

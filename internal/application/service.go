@@ -19,24 +19,26 @@ import (
 // which cannot be made part of a database transaction.  Repository uniqueness
 // remains the cross-instance authority.
 type Service struct {
-	Repo       ports.Repository
-	Clock      ports.Clock
-	IDs        ports.IDGenerator
-	Aliases    ports.AliasGenerator
-	Tokens     ports.TokenGenerator
-	Hashes     ports.TokenHasher
-	Ports      ports.PortAllocator
-	Processes  ports.ProcessSupervisor
-	Health     ports.HealthChecker
-	Proxy      ports.Proxy
-	Logs       ports.LogStream
-	Audit      ports.Audit
-	Scheduler  ports.Scheduler
-	BaseHost   domain.BaseHost
-	PublicPort int
-	StopGrace  time.Duration
-	mu         sync.Mutex
-	scheduled  map[domain.LinkID]ports.CancelFunc
+	Repo           ports.Repository
+	Clock          ports.Clock
+	IDs            ports.IDGenerator
+	Aliases        ports.AliasGenerator
+	Tokens         ports.TokenGenerator
+	Hashes         ports.TokenHasher
+	Ports          ports.PortAllocator
+	Processes      ports.ProcessSupervisor
+	Health         ports.HealthChecker
+	Proxy          ports.Proxy
+	Logs           ports.LogStream
+	Audit          ports.Audit
+	Scheduler      ports.Scheduler
+	BaseHost       domain.BaseHost
+	PublicPort     int
+	ExternalScheme string
+	ExternalPort   int
+	StopGrace      time.Duration
+	mu             sync.Mutex
+	scheduled      map[domain.LinkID]ports.CancelFunc
 }
 
 func (s *Service) now() time.Time {
@@ -341,17 +343,41 @@ func (s *Service) start(ctx context.Context, sp domain.Space, l domain.Link) (Cr
 		_ = s.Proxy.Remove(ctx, l.ID)
 		return s.failStart(ctx, l, p, e)
 	}
-	publicPort := s.PublicPort
-	if publicPort == 0 {
-		publicPort = 9955
-	}
-	url, urlErr := domain.PublicURL(s.BaseHost, l.Name, sp.Alias, publicPort)
+	url, urlErr := s.AdvertisedURL(l.Name, sp.Alias)
 	if urlErr != nil {
 		_ = s.Proxy.Remove(ctx, l.ID)
 		return s.failStart(ctx, l, p, urlErr)
 	}
 	return CreateLinkResult{Link: l, URL: url}, nil
 }
+
+// AdvertisedURL uses explicitly configured external TLS/port settings when
+// present, otherwise retains the legacy public-listener inference.
+func (s *Service) AdvertisedURL(name domain.LinkName, alias domain.Alias) (string, error) {
+	publicPort := s.PublicPort
+	if publicPort == 0 {
+		publicPort = 9955
+	}
+	scheme, port := s.ExternalScheme, s.ExternalPort
+	if scheme != "" && port == 0 {
+		if scheme == "https" {
+			port = 443
+		} else {
+			port = 80
+		}
+	}
+	if scheme == "" {
+		scheme = "http"
+		if publicPort == 443 {
+			scheme = "https"
+		}
+		if port == 0 {
+			port = publicPort
+		}
+	}
+	return domain.PublicURLWithScheme(s.BaseHost, name, alias, scheme, port)
+}
+
 func (s *Service) route(sp domain.Space, l domain.Link) ports.Route {
 	return ports.Route{LinkID: l.ID, Hostname: s.BaseHost.Host(l.Name, sp.Alias), Upstream: fmt.Sprintf("127.0.0.1:%d", l.AllocatedPort)}
 }

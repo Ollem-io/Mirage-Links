@@ -5,6 +5,7 @@ import (
 	"github.com/primeintellect/mirage/internal/adapters/inbound/httpapi"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,5 +54,13 @@ func TestStartPrivateHTTP(t *testing.T) {
 func TestPortNumber(t *testing.T) {
 	if portNumber("127.0.0.1:1234") != 1234 || portNumber("bad") != 9955 {
 		t.Fatal()
+	}
+}
+
+func TestInvalidLinkHandler(t *testing.T) {
+	w := httptest.NewRecorder()
+	invalidLinkHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://unknown.example/nope", nil))
+	if w.Code != http.StatusNotFound || w.Header().Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(w.Body.String(), "Link invalid or expired") {
+		t.Fatalf("%d %q %s", w.Code, w.Header().Get("Content-Type"), w.Body.String())
 	}
 }

@@ -33,18 +33,31 @@ func (b BaseHost) Host(name LinkName, alias Alias) string {
 	}
 	return fmt.Sprintf("%s-%s.%s", name, alias, b)
 }
+
+// PublicURL preserves the legacy listener-derived URL behavior.
 func PublicURL(b BaseHost, name LinkName, alias Alias, port int) (string, error) {
+	scheme := "http"
+	if port == 443 {
+		scheme = "https"
+	}
+	return PublicURLWithScheme(b, name, alias, scheme, port)
+}
+
+// PublicURLWithScheme builds an advertised URL independently of Mirage's
+// internal public listener. Default ports are deliberately omitted.
+func PublicURLWithScheme(b BaseHost, name LinkName, alias Alias, scheme string, port int) (string, error) {
+	scheme = strings.ToLower(strings.TrimSpace(scheme))
+	if scheme != "http" && scheme != "https" {
+		return "", NewValidation("external_scheme", "must be http or https")
+	}
 	if port < 1 || port > 65535 {
-		return "", NewValidation("public_port", "must be 1 to 65535")
+		return "", NewValidation("external_port", "must be 1 to 65535")
 	}
 	host := b.Host(name, alias)
-	if port == 80 {
-		return "http://" + host, nil
+	if (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
+		return scheme + "://" + host, nil
 	}
-	if port == 443 {
-		return "https://" + host, nil
-	}
-	return "http://" + host + ":" + strconv.Itoa(port), nil
+	return scheme + "://" + host + ":" + strconv.Itoa(port), nil
 }
 
 type HealthMethod string

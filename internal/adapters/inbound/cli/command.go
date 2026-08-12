@@ -25,8 +25,10 @@ type VersionSource func() string
 
 // StartOptions are resolved configuration passed to executable composition.
 type StartOptions struct {
-	PublicAddress, PrivateAddress, ConfigPath, BaseHost, DataPath, CaddyAdmin, CaddyBinary string
-	CaddyManaged                                                                           bool
+	PublicAddress, PrivateAddress, ConfigPath, BaseHost, DataPath, CaddyAdmin, CaddyBinary, ExternalScheme string
+	ExternalPort                                                                                           int
+	DashboardSSL                                                                                           bool
+	CaddyManaged                                                                                           bool
 }
 type StartFunc func(context.Context, StartOptions) (func() error, error)
 
@@ -81,7 +83,7 @@ func (c Command) doStart(a []string, conf config, path string) int {
 	if c.start == nil {
 		return c.fail(fmt.Errorf("start is unavailable"))
 	}
-	o := StartOptions{PublicAddress: conf.PublicAddress, PrivateAddress: conf.PrivateAddress, ConfigPath: path, BaseHost: conf.BaseHost, DataPath: conf.DataPath, CaddyAdmin: conf.Caddy.AdminURL, CaddyBinary: conf.Caddy.Binary, CaddyManaged: conf.Caddy.Managed}
+	o := StartOptions{PublicAddress: conf.PublicAddress, PrivateAddress: conf.PrivateAddress, ConfigPath: path, BaseHost: conf.BaseHost, DataPath: conf.DataPath, CaddyAdmin: conf.Caddy.AdminURL, CaddyBinary: conf.Caddy.Binary, CaddyManaged: conf.Caddy.Managed, ExternalScheme: conf.ExternalScheme, ExternalPort: conf.ExternalPort, DashboardSSL: conf.DashboardSSL}
 	for len(a) > 0 {
 		if len(a) < 2 {
 			return c.usageError(a[0] + " requires a value")
@@ -735,8 +737,10 @@ func (c Command) cobraTree() *cobra.Command {
 }
 
 type config struct {
-	BaseHost, PublicAddress, PrivateAddress, DataPath string
-	Caddy                                             struct {
+	BaseHost, PublicAddress, PrivateAddress, DataPath, ExternalScheme string
+	ExternalPort                                                      int
+	DashboardSSL                                                      bool
+	Caddy                                                             struct {
 		AdminURL, Binary string
 		Managed          bool
 	}
@@ -803,12 +807,28 @@ func loadConfig(path string, getenv func(string) string, getwd func() (string, e
 			c.PrivateAddress = v
 		case "data_path":
 			c.DataPath = v
+		case "external_scheme":
+			c.ExternalScheme = strings.ToLower(v)
+		case "external_port":
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return c, fmt.Errorf("config external_port: must be a number")
+			}
+			c.ExternalPort = n
+		case "dashboard_ssl":
+			c.DashboardSSL = strings.EqualFold(v, "true")
 		}
 	}
 	if c.BaseHost != "" {
 		if _, err := domain.ParseBaseHost(c.BaseHost); err != nil {
 			return c, fmt.Errorf("config base_host: %w", err)
 		}
+	}
+	if c.ExternalScheme != "" && c.ExternalScheme != "http" && c.ExternalScheme != "https" {
+		return c, fmt.Errorf("config external_scheme: must be http or https")
+	}
+	if c.ExternalPort < 0 || c.ExternalPort > 65535 {
+		return c, fmt.Errorf("config external_port: must be 1 to 65535 when set")
 	}
 	for _, a := range []string{c.PublicAddress, c.PrivateAddress} {
 		if a != "" && !validBind(a) {

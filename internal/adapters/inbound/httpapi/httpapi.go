@@ -39,11 +39,15 @@ type Service interface {
 type Config struct {
 	RequestTimeout time.Duration
 	MaxBodyBytes   int
+	// DashboardSSL marks a trusted TLS-terminating deployment; forwarded headers
+	// are deliberately not used as a security signal.
+	DashboardSSL bool
 }
 type API struct {
 	service         Service
 	timeout         time.Duration
 	maxBody         int
+	dashboardSSL    bool
 	ready           atomic.Bool
 	gateMu          sync.Mutex
 	draining        bool
@@ -58,7 +62,7 @@ func New(service Service, cfg Config) *API {
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = maxBody
 	}
-	a := &API{service: service, timeout: cfg.RequestTimeout, maxBody: cfg.MaxBodyBytes}
+	a := &API{service: service, timeout: cfg.RequestTimeout, maxBody: cfg.MaxBodyBytes, dashboardSSL: cfg.DashboardSSL}
 	return a
 }
 func (a *API) SetReady(v bool) { a.ready.Store(v) }

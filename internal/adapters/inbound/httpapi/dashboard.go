@@ -72,13 +72,7 @@ func (a *API) dashboardAuth(w http.ResponseWriter, r *http.Request) (domain.Spac
 		return domain.Space{}, "", false
 	}
 	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-		secure := r.TLS != nil
-		http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_token", Value: t.Reveal(), Path: "/dashboard", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure})
-		csrf := make([]byte, 24)
-		if _, e := rand.Read(csrf); e != nil {
-			return domain.Space{}, "", false
-		}
-		http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_csrf", Value: base64.RawURLEncoding.EncodeToString(csrf), Path: "/dashboard", SameSite: http.SameSiteStrictMode, Secure: secure})
+		a.setDashboardCookies(w, r, t)
 	}
 	return s, t, true
 }
@@ -105,7 +99,66 @@ func dashboardCSRF(r *http.Request) bool {
 func dashboardForbidden(w http.ResponseWriter) {
 	writeErr(w, http.StatusNotFound, "not_found", "route not found", nil)
 }
+func (a *API) setDashboardCookies(w http.ResponseWriter, r *http.Request, t domain.Token) {
+	secure := r.TLS != nil || a.dashboardSSL
+	http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_token", Value: t.Reveal(), Path: "/dashboard", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure})
+	csrf := make([]byte, 24)
+	if _, err := rand.Read(csrf); err != nil {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_csrf", Value: base64.RawURLEncoding.EncodeToString(csrf), Path: "/dashboard", SameSite: http.SameSiteStrictMode, Secure: secure})
+}
+
+func dashboardLogin(w http.ResponseWriter, invalid bool) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	msg := ""
+	if invalid {
+		msg = `<p role="alert">Unauthorized. Please try again.</p>`
+	}
+	_, _ = io.WriteString(w, `<!doctype html><html><head><title>Mirage dashboard</title></head><body><h1>Mirage dashboard</h1>`+msg+`<form method="post" action="/dashboard/session"><label>Space token <input type="password" name="token" autocomplete="current-password" required></label><button type="submit">Open dashboard</button></form></body></html>`)
+}
+
+func (a *API) dashboardSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		dashboardForbidden(w)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, int64(a.maxBody))
+	if err := r.ParseForm(); err != nil {
+		dashboardLogin(w, true)
+		return
+	}
+	t, err := domain.ParseToken(r.PostForm.Get("token"))
+	if err != nil {
+		dashboardLogin(w, true)
+		return
+	}
+	if _, err = a.service.SpaceForToken(r.Context(), t); err != nil {
+		dashboardLogin(w, true)
+		return
+	}
+	a.setDashboardCookies(w, r, t)
+	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+}
+
 func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/dashboard/session" {
+		a.dashboardSession(w, r)
+		return
+	}
+	if r.URL.Path == "/dashboard" && r.Method == http.MethodGet {
+		t, present := a.dashboardToken(r)
+		if !present {
+			dashboardLogin(w, false)
+			return
+		}
+		if _, err := a.service.SpaceForToken(r.Context(), t); err != nil {
+			// A stale/invalid cookie is anonymous, not a private route disclosure.
+			dashboardLogin(w, false)
+			return
+		}
+	}
 	if r.URL.Path == "/dashboard/assets/dashboard.css" {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
@@ -183,7 +236,7 @@ func (a *API) dashboardData(ctx context.Context, s domain.Space, t domain.Token,
 }
 func (a *API) dashboardURL(l domain.Link, s domain.Space) string {
 	if svc, ok := a.service.(*application.Service); ok {
-		if u, e := domain.PublicURL(svc.BaseHost, l.Name, s.Alias, svc.PublicPort); e == nil {
+		if u, e := svc.AdvertisedURL(l.Name, s.Alias); e == nil {
 			return u
 		}
 	}
