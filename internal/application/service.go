@@ -37,6 +37,8 @@ type Service struct {
 	ExternalScheme string
 	ExternalPort   int
 	StopGrace      time.Duration
+	// AdminTokenHash is configured outside the database; nil preserves legacy mode.
+	AdminTokenHash *domain.AdminTokenHash
 	mu             sync.Mutex
 	scheduled      map[domain.LinkID]ports.CancelFunc
 }
@@ -110,6 +112,37 @@ func (s *Service) CreateSpace(ctx context.Context, in CreateSpaceInput) (CreateS
 func (s *Service) ListSpaces(ctx context.Context) ([]domain.Space, error) {
 	return s.Repo.ListSpaces(ctx)
 }
+
+// AdminConfigured reports whether installation-wide administration is enabled.
+func (s *Service) AdminConfigured() bool { return s.AdminTokenHash != nil }
+func (s *Service) AuthorizeAdmin(_ context.Context, token domain.AdminToken) error {
+	if s.AdminTokenHash == nil {
+		return nil
+	} // documented legacy compatibility mode
+	if !s.AdminTokenHash.Verify(token) {
+		return domain.NewUnauthorized("invalid admin bearer token")
+	}
+	return nil
+}
+func (s *Service) AdminListSpaces(ctx context.Context, token domain.AdminToken) ([]domain.Space, error) {
+	if err := s.AuthorizeAdmin(ctx, token); err != nil {
+		return nil, err
+	}
+	return s.ListSpaces(ctx)
+}
+func (s *Service) AdminCreateSpace(ctx context.Context, token domain.AdminToken, in CreateSpaceInput) (CreateSpaceResult, error) {
+	if err := s.AuthorizeAdmin(ctx, token); err != nil {
+		return CreateSpaceResult{}, err
+	}
+	return s.CreateSpace(ctx, in)
+}
+func (s *Service) AdminGetSpace(ctx context.Context, token domain.AdminToken, alias string) (domain.Space, error) {
+	if err := s.AuthorizeAdmin(ctx, token); err != nil {
+		return domain.Space{}, err
+	}
+	return s.GetSpace(ctx, alias)
+}
+
 func (s *Service) authenticate(ctx context.Context, alias domain.Alias, token domain.Token) (domain.Space, error) {
 	sp, err := s.Repo.FindSpaceByAlias(ctx, alias)
 	if err != nil {

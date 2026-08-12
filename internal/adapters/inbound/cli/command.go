@@ -28,19 +28,21 @@ type StartOptions struct {
 	PublicAddress, PrivateAddress, ConfigPath, BaseHost, DataPath, CaddyAdmin, CaddyBinary, ExternalScheme string
 	ExternalPort                                                                                           int
 	DashboardSSL                                                                                           bool
+	AdminTokenHashFile                                                                                     string
 	CaddyManaged                                                                                           bool
 }
 type StartFunc func(context.Context, StartOptions) (func() error, error)
 
 type Command struct {
-	stdout, stderr io.Writer
-	version        VersionSource
-	http           *http.Client
-	start          StartFunc
-	getenv         func(string) string
-	getwd          func() (string, error)
-	forcedToken    string
-	waitSignal     func()
+	stdout, stderr   io.Writer
+	version          VersionSource
+	http             *http.Client
+	start            StartFunc
+	getenv           func(string) string
+	getwd            func() (string, error)
+	forcedToken      string
+	forcedAdminToken string
+	waitSignal       func()
 }
 
 func New(stdout, stderr io.Writer, version VersionSource) Command {
@@ -83,7 +85,7 @@ func (c Command) doStart(a []string, conf config, path string) int {
 	if c.start == nil {
 		return c.fail(fmt.Errorf("start is unavailable"))
 	}
-	o := StartOptions{PublicAddress: conf.PublicAddress, PrivateAddress: conf.PrivateAddress, ConfigPath: path, BaseHost: conf.BaseHost, DataPath: conf.DataPath, CaddyAdmin: conf.Caddy.AdminURL, CaddyBinary: conf.Caddy.Binary, CaddyManaged: conf.Caddy.Managed, ExternalScheme: conf.ExternalScheme, ExternalPort: conf.ExternalPort, DashboardSSL: conf.DashboardSSL}
+	o := StartOptions{PublicAddress: conf.PublicAddress, PrivateAddress: conf.PrivateAddress, ConfigPath: path, BaseHost: conf.BaseHost, DataPath: conf.DataPath, CaddyAdmin: conf.Caddy.AdminURL, CaddyBinary: conf.Caddy.Binary, CaddyManaged: conf.Caddy.Managed, ExternalScheme: conf.ExternalScheme, ExternalPort: conf.ExternalPort, DashboardSSL: conf.DashboardSSL, AdminTokenHashFile: conf.Admin.TokenHashFile}
 	for len(a) > 0 {
 		if len(a) < 2 {
 			return c.usageError(a[0] + " requires a value")
@@ -160,7 +162,11 @@ func (c Command) space(a []string, base string, jout bool, conf config) int {
 			}
 			a = a[2:]
 		}
-		return c.request(base, "POST", "/api/v1/spaces", "", map[string]string{"ttl": ttl, "alias": alias}, jout, func(v map[string]any) {
+		tok, e := c.adminToken("")
+		if e != nil {
+			return c.fail(e)
+		}
+		return c.request(base, "POST", "/api/v1/spaces", tok, map[string]string{"ttl": ttl, "alias": alias}, jout, func(v map[string]any) {
 			s, _ := v["space"].(map[string]any)
 			fmt.Fprintf(c.stdout, "Alias: %v\nToken: %v\nExpires: %v\n", s["alias"], v["token"], s["expires_at"])
 		})
@@ -179,7 +185,11 @@ func (c Command) space(a []string, base string, jout bool, conf config) int {
 			}
 			path += "/" + url.PathEscape(a[0])
 		}
-		return c.request(base, "GET", path, "", nil, jout, func(v map[string]any) { c.printRows(v, "spaces", []string{"alias", "expires_at"}) })
+		tok, e := c.adminToken("")
+		if e != nil {
+			return c.fail(e)
+		}
+		return c.request(base, "GET", path, tok, nil, jout, func(v map[string]any) { c.printRows(v, "spaces", []string{"alias", "expires_at"}) })
 	case "delete":
 		if len(a) == 0 {
 			return c.usageError("space delete requires an alias")
@@ -209,12 +219,14 @@ func (c Command) space(a []string, base string, jout bool, conf config) int {
 			}
 			return c.usageError("invalid space delete option")
 		}
-		if !force {
-			var e error
+		var e error
+		if force {
+			tok, e = c.adminToken(tok)
+		} else {
 			tok, e = c.token(tok)
-			if e != nil {
-				return c.fail(e)
-			}
+		}
+		if e != nil {
+			return c.fail(e)
 		}
 		return c.request(base, "DELETE", "/api/v1/spaces/"+url.PathEscape(alias), tok, map[string]any{"force": force, "reason": reason}, jout, func(map[string]any) { fmt.Fprintln(c.stdout, "Deleted space", alias) })
 	}
@@ -392,6 +404,38 @@ func (c Command) token(explicit string) (string, error) {
 	}
 	return "", fmt.Errorf("token required: ./.mirage_token is empty")
 }
+func (c Command) adminToken(explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return explicit, nil
+	}
+	if strings.TrimSpace(c.forcedAdminToken) != "" {
+		return c.forcedAdminToken, nil
+	}
+	if x := strings.TrimSpace(c.getenv("MIRAGE_ADMIN_TOKEN")); x != "" {
+		return x, nil
+	}
+	wd, e := c.getwd()
+	if e != nil {
+		return "", e
+	}
+	p := filepath.Join(wd, ".mirage_admin_token")
+	b, e := os.ReadFile(p)
+	if os.IsNotExist(e) {
+		return "", nil
+	}
+	if e != nil {
+		return "", e
+	}
+	if fi, e := os.Stat(p); e == nil && fi.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(c.stderr, "mirage: warning: %s is group/world-readable\n", p)
+	}
+	x := strings.TrimSpace(string(b))
+	if x == "" {
+		return "", nil
+	}
+	return x, nil
+}
+
 func (c Command) request(base, method, path, tok string, payload any, jout bool, human func(map[string]any)) int {
 	var body io.Reader
 	if payload != nil {
@@ -547,7 +591,7 @@ func (c Command) printRows(v map[string]any, key string, fields []string) {
 // cobraTree is the executing command tree. Cobra owns parsing, validation,
 // help, and dispatch; the leaf handlers perform only API/start behavior.
 func (c Command) cobraTree() *cobra.Command {
-	var server, token, cfgPath string
+	var server, token, adminToken, cfgPath string
 	var jsonOut bool
 	root := &cobra.Command{
 		Use: "mirage", Short: "Mirage manages temporary local application environments",
@@ -557,6 +601,7 @@ func (c Command) cobraTree() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&server, "server", "", "private Mirage server URL")
 	root.PersistentFlags().StringVar(&token, "token", "", "space bearer token")
+	root.PersistentFlags().StringVar(&adminToken, "admin-token", "", "installation admin bearer token")
 	root.PersistentFlags().BoolVar(&jsonOut, "json", false, "emit JSON")
 	root.PersistentFlags().StringVar(&cfgPath, "config", "", "configuration file")
 	root.Flags().BoolP("version", "v", false, "print version")
@@ -611,6 +656,7 @@ func (c Command) cobraTree() *cobra.Command {
 			base = "http://" + base
 		}
 		c.forcedToken = token
+		c.forcedAdminToken = adminToken
 		return conf, base, nil
 	}
 	failResolve := func(err error) error { return commandResult(c.fail(err)) }
@@ -732,7 +778,22 @@ func (c Command) cobraTree() *cobra.Command {
 		}}
 	}
 	link.AddCommand(linkCreate, linkList, linkLogs, leaf("restart"), leaf("delete"))
-	root.AddCommand(start, space, link)
+	admin := &cobra.Command{Use: "admin", Short: "Installation administration"}
+	var adminTokenFile, adminHashFile string
+	init := &cobra.Command{Use: "init", Short: "create an installation admin token", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
+		if adminTokenFile == "" || adminHashFile == "" {
+			return fmt.Errorf("--token-file and --hash-file are required")
+		}
+		if err := initAdminToken(adminTokenFile, adminHashFile); err != nil {
+			return commandResult(c.fail(err))
+		}
+		fmt.Fprintf(c.stdout, "Admin token created: %s\nAdmin hash created: %s\n", adminTokenFile, adminHashFile)
+		return nil
+	}}
+	init.Flags().StringVar(&adminTokenFile, "token-file", "", "new token file (mode 0600)")
+	init.Flags().StringVar(&adminHashFile, "hash-file", "", "new SHA-256 hash file (mode 0640)")
+	admin.AddCommand(init)
+	root.AddCommand(start, space, link, admin)
 	return root
 }
 
@@ -740,6 +801,7 @@ type config struct {
 	BaseHost, PublicAddress, PrivateAddress, DataPath, ExternalScheme string
 	ExternalPort                                                      int
 	DashboardSSL                                                      bool
+	Admin                                                             struct{ TokenHashFile string }
 	Caddy                                                             struct {
 		AdminURL, Binary string
 		Managed          bool
@@ -787,6 +849,12 @@ func loadConfig(path string, getenv func(string) string, getwd func() (string, e
 			continue
 		}
 		k, v := strings.TrimSpace(p[0]), strings.Trim(strings.TrimSpace(p[1]), "\"'")
+		if section == "admin" {
+			if k == "token_hash_file" {
+				c.Admin.TokenHashFile = v
+			}
+			continue
+		}
 		if section == "caddy" {
 			switch k {
 			case "admin_url":
@@ -844,4 +912,52 @@ func validBind(a string) bool {
 	}
 	n, err := strconv.Atoi(p)
 	return err == nil && n > 0 && n < 65536
+}
+
+// initAdminToken uses exclusive opens so a credential is never overwritten or
+// redirected through a symlink. Both paths must be explicit operator choices.
+func initAdminToken(tokenPath, hashPath string) error {
+	for _, p := range []string{tokenPath, hashPath} {
+		if fi, err := os.Lstat(p); err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 || fi.Mode().IsRegular() {
+				return fmt.Errorf("refusing existing path %s", p)
+			}
+			return fmt.Errorf("refusing non-regular path %s", p)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	t, err := domain.NewAdminToken()
+	if err != nil {
+		return err
+	}
+	tf, err := os.OpenFile(tokenPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err = tf.WriteString(t.Reveal() + "\n"); err == nil {
+		err = tf.Close()
+	} else {
+		_ = tf.Close()
+	}
+	if err != nil {
+		_ = os.Remove(tokenPath)
+		return err
+	}
+	hf, err := os.OpenFile(hashPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
+	if err != nil {
+		_ = os.Remove(tokenPath)
+		return err
+	}
+	if _, err = fmt.Fprintf(hf, "%x\n", t.Hash()); err == nil {
+		err = hf.Close()
+	} else {
+		_ = hf.Close()
+	}
+	if err != nil {
+		_ = os.Remove(tokenPath)
+		_ = os.Remove(hashPath)
+		return err
+	}
+	return nil
 }

@@ -249,10 +249,49 @@ func bearer(r *http.Request) (domain.Token, error) {
 	}
 	return domain.Token(strings.TrimSpace(strings.TrimPrefix(v, p))), nil
 }
+
+type adminService interface {
+	AdminConfigured() bool
+	AdminListSpaces(context.Context, domain.AdminToken) ([]domain.Space, error)
+	AdminCreateSpace(context.Context, domain.AdminToken, application.CreateSpaceInput) (application.CreateSpaceResult, error)
+	AdminGetSpace(context.Context, domain.AdminToken, string) (domain.Space, error)
+	AuthorizeAdmin(context.Context, domain.AdminToken) error
+}
+
+func adminBearer(r *http.Request) (domain.AdminToken, error) {
+	v := r.Header.Get("Authorization")
+	const p = "Bearer "
+	if !strings.HasPrefix(v, p) {
+		return "", domain.NewUnauthorized("missing admin bearer token")
+	}
+	return domain.ParseAdminToken(strings.TrimSpace(strings.TrimPrefix(v, p)))
+}
+func (a *API) admin(r *http.Request) (adminService, domain.AdminToken, error) {
+	x, ok := a.service.(adminService)
+	if !ok || !x.AdminConfigured() {
+		return nil, "", nil
+	}
+	t, e := adminBearer(r)
+	if e != nil {
+		return x, "", e
+	}
+	e = x.AuthorizeAdmin(r.Context(), t)
+	return x, t, e
+}
 func (a *API) spaces(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
-		x, e := a.service.ListSpaces(r.Context())
+		ad, tok, e := a.admin(r)
+		if e != nil {
+			apiErr(w, e)
+			return
+		}
+		var x []domain.Space
+		if ad != nil {
+			x, e = ad.AdminListSpaces(r.Context(), tok)
+		} else {
+			x, e = a.service.ListSpaces(r.Context())
+		}
 		if e != nil {
 			apiErr(w, e)
 			return
@@ -280,7 +319,17 @@ func (a *API) spaces(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			x, e := a.service.CreateSpace(r.Context(), application.CreateSpaceInput{TTL: ttl, Alias: in.Alias})
+			ad, tok, e := a.admin(r)
+			if e != nil {
+				apiErr(w, e)
+				return
+			}
+			var x application.CreateSpaceResult
+			if ad != nil {
+				x, e = ad.AdminCreateSpace(r.Context(), tok, application.CreateSpaceInput{TTL: ttl, Alias: in.Alias})
+			} else {
+				x, e = a.service.CreateSpace(r.Context(), application.CreateSpaceInput{TTL: ttl, Alias: in.Alias})
+			}
 			if e != nil {
 				apiErr(w, e)
 				return
@@ -294,7 +343,17 @@ func (a *API) spaces(w http.ResponseWriter, r *http.Request) {
 func (a *API) space(w http.ResponseWriter, r *http.Request, alias string) {
 	switch r.Method {
 	case "GET":
-		x, e := a.service.GetSpace(r.Context(), alias)
+		ad, tok, e := a.admin(r)
+		if e != nil {
+			apiErr(w, e)
+			return
+		}
+		var x domain.Space
+		if ad != nil {
+			x, e = ad.AdminGetSpace(r.Context(), tok, alias)
+		} else {
+			x, e = a.service.GetSpace(r.Context(), alias)
+		}
 		if e != nil {
 			apiErr(w, e)
 			return
@@ -315,6 +374,13 @@ func (a *API) space(w http.ResponseWriter, r *http.Request, alias string) {
 				tok, e = bearer(r)
 				if e != nil {
 					apiErr(w, e)
+					return
+				}
+			}
+			if in.Force {
+				_, _, ae := a.admin(r)
+				if ae != nil {
+					apiErr(w, ae)
 					return
 				}
 			}

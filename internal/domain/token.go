@@ -14,6 +14,11 @@ import (
 type Token string
 type TokenHash [32]byte
 
+// AdminToken is an installation-wide bearer credential. It is intentionally a
+// distinct, non-interchangeable wire format from a space Token.
+type AdminToken string
+type AdminTokenHash [32]byte
+
 func NewToken() (Token, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -21,6 +26,34 @@ func NewToken() (Token, error) {
 	}
 	return Token("mir_" + base64.RawURLEncoding.EncodeToString(b)), nil
 }
+func NewAdminToken() (AdminToken, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return AdminToken("mir_admin_" + base64.RawURLEncoding.EncodeToString(b)), nil
+}
+func ParseAdminToken(s string) (AdminToken, error) {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "mir_admin_") {
+		return "", NewValidation("admin_token", "invalid admin bearer token")
+	}
+	p := s[len("mir_admin_"):]
+	b, err := base64.RawURLEncoding.DecodeString(p)
+	if err != nil || len(b) != 32 || base64.RawURLEncoding.EncodeToString(b) != p {
+		return "", NewValidation("admin_token", "invalid admin bearer token")
+	}
+	return AdminToken(s), nil
+}
+func (t AdminToken) Reveal() string       { return string(t) }
+func (t AdminToken) Hash() AdminTokenHash { return sha256.Sum256([]byte(t)) }
+func (h AdminTokenHash) Verify(t AdminToken) bool {
+	got := t.Hash()
+	return subtle.ConstantTimeCompare(h[:], got[:]) == 1
+}
+func (t AdminToken) MarshalJSON() ([]byte, error)     { return json.Marshal("[redacted]") }
+func (h AdminTokenHash) MarshalJSON() ([]byte, error) { return json.Marshal("[redacted]") }
+
 func ParseToken(s string) (Token, error) {
 	s = strings.TrimSpace(s)
 	if !strings.HasPrefix(s, "mir_") {

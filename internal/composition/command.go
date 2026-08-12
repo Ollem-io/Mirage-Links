@@ -3,6 +3,8 @@ package composition
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -129,7 +131,15 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 			return nil, e
 		}
 	}
-	svc := &application.Service{Repo: store, Clock: clock{}, IDs: ids{}, Aliases: aliases{}, Tokens: tokens{}, Hashes: hashes{}, Ports: process.NewAllocator(), Processes: sup, Health: health.New(2 * time.Second), Proxy: proxy, Logs: logStore, Audit: store, BaseHost: base, PublicPort: portNumber(o.PublicAddress), ExternalScheme: o.ExternalScheme, ExternalPort: o.ExternalPort}
+	adminHash, e := readAdminHash(o.AdminTokenHashFile)
+	if e != nil {
+		if child != nil {
+			_ = child.Stop()
+		}
+		_ = store.Close()
+		return nil, e
+	}
+	svc := &application.Service{Repo: store, Clock: clock{}, IDs: ids{}, Aliases: aliases{}, Tokens: tokens{}, Hashes: hashes{}, Ports: process.NewAllocator(), Processes: sup, Health: health.New(2 * time.Second), Proxy: proxy, Logs: logStore, Audit: store, BaseHost: base, PublicPort: portNumber(o.PublicAddress), ExternalScheme: o.ExternalScheme, ExternalPort: o.ExternalPort, AdminTokenHash: adminHash}
 	// Reconciliation is the readiness gate: no private listener (and hence no mutation) is admitted until state is repaired.
 	if e = svc.Reconcile(ctx); e != nil {
 		if child != nil {
@@ -239,4 +249,33 @@ func invalidLinkHandler() http.Handler {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprint(w, "<!doctype html><html><body>Link invalid or expired</body></html>")
 	})
+}
+
+func readAdminHash(path string) (*domain.AdminTokenHash, error) {
+	if path == "" {
+		return nil, nil
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("admin token hash file: %w", err)
+	}
+	if !fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("admin token hash file must be a regular file not group/world writable")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	x := strings.TrimSpace(string(b))
+	if len(x) != 64 {
+		return nil, fmt.Errorf("admin token hash file must contain SHA-256 hex")
+	}
+	raw, err := hex.DecodeString(x)
+	if err != nil {
+		return nil, fmt.Errorf("admin token hash file must contain SHA-256 hex")
+	}
+	var h domain.AdminTokenHash
+	copy(h[:], raw)
+	_ = sha256.Size
+	return &h, nil
 }

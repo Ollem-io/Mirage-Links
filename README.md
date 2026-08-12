@@ -82,3 +82,15 @@ dashboard_ssl: true # only when a trusted TLS terminator fronts the private dash
 
 `external_scheme` is `http` or `https` (case-insensitive); with it set, zero/unset `external_port` selects 80 or 443. Without it Mirage retains legacy URL inference from `public_address`. The dashboard login posts its token in the form body, never the query string. A Zero Trust gateway (such as Pangolin) can still issue its own 401 before Mirage sees the request; that is distinct from Mirage's login landing page.
 
+
+## Installation admin token
+
+Optional installation-wide administration is enabled with:
+
+```yaml
+admin:
+  token_hash_file: /etc/mirage/admin-token.sha256
+```
+
+Create credentials offline (both paths are deliberately required):
+`mirage admin init --token-file PATH --hash-file PATH`. The token file is 0600 and hash file is 0640; creation is exclusive and raw credentials are never printed. Use `--admin-token`, `MIRAGE_ADMIN_TOKEN`, or `./.mirage_admin_token` for administrative API/CLI operations. Without `admin.token_hash_file`, Mirage retains legacy unauthenticated global space administration for backwards compatibility; operators should configure it in production.
