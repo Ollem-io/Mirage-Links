@@ -75,6 +75,9 @@ type Proxy interface {
 	Add(context.Context, Route) error
 	Remove(context.Context, domain.LinkID) error
 	List(context.Context) ([]Route, error)
+	// Reconcile makes the proxy's owned route set exactly desired. Implementations
+	// must never alter routes outside their ownership namespace.
+	Reconcile(context.Context, []Route) error
 }
 type Route struct {
 	LinkID   domain.LinkID

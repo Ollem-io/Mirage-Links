@@ -224,15 +224,17 @@ func (c *Client) List(ctx context.Context) ([]ports.Route, error) {
 	return out, nil
 }
 
-// Reconcile upserts desired routes and deletes orphan Mirage routes. It makes no
-// write for malformed/unrelated routes, preserving them exactly as received.
+// Reconcile makes Mirage's owned routes exactly desired. It first validates the
+// complete desired set and snapshots the route array. Changes have compensating
+// inverse operations; on any Admin failure it restores every prior owned route
+// at its original array position. It never writes a whole server/config object.
 func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 	wanted := map[domain.LinkID]ports.Route{}
 	for _, r := range desired {
 		if err := validRoute(r); err != nil {
 			return err
 		}
-		if _, dup := wanted[r.LinkID]; dup {
+		if _, duplicate := wanted[r.LinkID]; duplicate {
 			return domain.NewConflict("duplicate desired Caddy route")
 		}
 		wanted[r.LinkID] = r
@@ -243,35 +245,96 @@ func (c *Client) Reconcile(ctx context.Context, desired []ports.Route) error {
 	if err != nil {
 		return err
 	}
-	// Delete reverse indices first so route indices cannot shift.
-	for i := len(all) - 1; i >= 0; i-- {
-		// The @id alone is the ownership boundary. A manually damaged owned
-		// route is still ours to repair/remove; a non-Mirage route is untouchable.
-		if !owned(all[i].ID) {
-			continue
-		}
-		id := domain.LinkID(strings.TrimPrefix(all[i].ID, Namespace))
-		desired, keep := wanted[id]
-		if !keep {
-			if err := c.write(ctx, http.MethodDelete, c.routesPath()+"/"+strconv.Itoa(i), nil); err != nil {
-				return err
+
+	type change struct{ undo func(context.Context) error }
+	undos := make([]change, 0)
+	rollback := func(cause error) error {
+		var rollbackErr error
+		for i := len(undos) - 1; i >= 0; i-- {
+			if err := undos[i].undo(ctx); err != nil && rollbackErr == nil {
+				rollbackErr = err
 			}
+		}
+		if rollbackErr != nil {
+			return fmt.Errorf("%w (rollback failed: %v)", cause, rollbackErr)
+		}
+		return cause
+	}
+	// First repair existing desired records. PUT preserves both route index and
+	// every non-owned route byte for byte.
+	for i, existing := range all {
+		if !owned(existing.ID) {
 			continue
 		}
-		have, valid := decode(all[i])
-		if valid && equal(have, desired) {
+		id := domain.LinkID(strings.TrimPrefix(existing.ID, Namespace))
+		want, keep := wanted[id]
+		if !keep {
+			continue
+		}
+		have, valid := decode(existing)
+		if valid && equal(have, want) {
 			delete(wanted, id)
 			continue
 		}
-		if err := c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(i), encode(desired)); err != nil {
-			return err
+		index, before := i, existing
+		if err := c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(index), encode(want)); err != nil {
+			return rollback(err)
 		}
+		undos = append(undos, change{func(ctx context.Context) error {
+			return c.write(ctx, http.MethodPut, c.routesPath()+"/"+strconv.Itoa(index), before)
+		}})
 		delete(wanted, id)
 	}
-	for _, r := range wanted {
-		if err := c.write(ctx, http.MethodPost, c.routesPath(), encode(r)); err != nil {
-			return err
+	// Then append missing records. Undo finds its namespaced identity rather
+	// than relying on a position that another Admin client could have shifted.
+	for _, want := range wanted {
+		added := want
+		if err := c.write(ctx, http.MethodPost, c.routesPath(), encode(added)); err != nil {
+			return rollback(err)
 		}
+		undos = append(undos, change{func(ctx context.Context) error {
+			current, err := c.fetch(ctx)
+			if err != nil {
+				return err
+			}
+			for i, r := range current {
+				if r.ID == routeID(added.LinkID) {
+					return c.write(ctx, http.MethodDelete, c.routesPath()+"/"+strconv.Itoa(i), nil)
+				}
+			}
+			return nil
+		}})
+	}
+	// Finally remove orphans from highest to lowest index. The inverse POST to
+	// an array index inserts the exact saved object back at that index.
+	for i := len(all) - 1; i >= 0; i-- {
+		before := all[i]
+		if !owned(before.ID) {
+			continue
+		}
+		id := domain.LinkID(strings.TrimPrefix(before.ID, Namespace))
+		if _, keep := wanted[id]; keep {
+			continue
+		} // wanted is empty for retained entries
+		// An entry retained earlier was deleted from wanted; distinguish it from
+		// an orphan by looking at the original desired IDs.
+		retained := false
+		for _, d := range desired {
+			if d.LinkID == id {
+				retained = true
+				break
+			}
+		}
+		if retained {
+			continue
+		}
+		index := i
+		if err := c.write(ctx, http.MethodDelete, c.routesPath()+"/"+strconv.Itoa(index), nil); err != nil {
+			return rollback(err)
+		}
+		undos = append(undos, change{func(ctx context.Context) error {
+			return c.write(ctx, http.MethodPost, c.routesPath()+"/"+strconv.Itoa(index), before)
+		}})
 	}
 	return nil
 }

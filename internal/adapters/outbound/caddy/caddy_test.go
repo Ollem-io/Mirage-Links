@@ -17,12 +17,14 @@ import (
 )
 
 type fake struct {
-	mu     sync.Mutex
-	routes []json.RawMessage
-	writes []string
-	fail   int
-	status int
-	bad    bool
+	mu          sync.Mutex
+	routes      []json.RawMessage
+	writes      []string
+	fail        int
+	failWriteAt int
+	writeCount  int
+	status      int
+	bad         bool
 }
 
 func (f *fake) serve(w http.ResponseWriter, r *http.Request) {
@@ -46,10 +48,22 @@ func (f *fake) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.writes = append(f.writes, r.Method+" "+r.URL.Path)
+	f.writeCount++
+	if f.failWriteAt > 0 && f.writeCount == f.failWriteAt {
+		http.Error(w, "injected", 400)
+		return
+	}
 	if r.Method == "POST" {
 		var x json.RawMessage
 		json.NewDecoder(r.Body).Decode(&x)
-		f.routes = append(f.routes, x)
+		last := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		if i, err := strconv.Atoi(last); err == nil {
+			f.routes = append(f.routes, nil)
+			copy(f.routes[i+1:], f.routes[i:])
+			f.routes[i] = x
+		} else {
+			f.routes = append(f.routes, x)
+		}
 	}
 	if r.Method == "PUT" {
 		i, _ := strconv.Atoi(r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:])
@@ -241,5 +255,61 @@ func TestNewAndDecodeBoundaries(t *testing.T) {
 		t.Fatal("malformed owned must not be managed")
 	}
 	if !errors.Is((&Error{Unavailable, errors.New("x")}), errors.New("x")) { /* only compile Unwrap path */
+	}
+}
+
+func TestReconcileRollsBackEveryFailedMutation(t *testing.T) {
+	for failAt := 1; failAt <= 3; failAt++ {
+		t.Run(strconv.Itoa(failAt), func(t *testing.T) {
+			f, c := setup(t)
+			keep := json.RawMessage(`{"@id":"external","handle":[{"handler":"static_response","body":"do not touch"}]}`)
+			original := []json.RawMessage{keep, mustJSON(t, encode(route("change", "old", "127.0.0.1:1"))), mustJSON(t, encode(route("orphan", "old", "127.0.0.1:2")))}
+			f.routes = append([]json.RawMessage(nil), original...)
+			f.failWriteAt = failAt
+			err := c.Reconcile(context.Background(), []ports.Route{route("change", "new", "127.0.0.1:3"), route("add", "new", "127.0.0.1:4")})
+			if err == nil {
+				t.Fatal("expected injected error")
+			}
+			if len(f.routes) != len(original) {
+				t.Fatalf("route count after rollback: %d, want %d; writes=%v", len(f.routes), len(original), f.writes)
+			}
+			for i := range original {
+				if string(f.routes[i]) != string(original[i]) {
+					t.Fatalf("route %d changed after rollback: %s != %s; writes=%v", i, f.routes[i], original[i], f.writes)
+				}
+			}
+		})
+	}
+}
+
+func TestAdditionalTransportAndMutationBranches(t *testing.T) {
+	// Error text is diagnostic but the kind remains the API contract.
+	if !strings.Contains((&Error{Kind: Unavailable, Err: errors.New("offline")}).Error(), "offline") {
+		t.Fatal("error text")
+	}
+	f, c := setup(t)
+	// A damaged owned record is repaired by Add rather than accepted as equal.
+	f.routes = []json.RawMessage{json.RawMessage(`{"@id":"mirage-route-one","handle":[{"handler":"file_server"}]}`)}
+	want := route("one", "good", "127.0.0.1:7")
+	if err := c.Add(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.List(context.Background()); err != nil || len(got) != 1 || got[0] != want {
+		t.Fatalf("%v %v", got, err)
+	}
+	// Cancellation while retrying a transient error maps as timeout.
+	f.fail = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.List(ctx); !IsKind(err, Timeout) {
+		t.Fatalf("%v", err)
+	}
+	// An unreachable configured Admin endpoint is an unavailable typed error.
+	dead, err := New(Config{AdminURL: "http://127.0.0.1:1", Timeout: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = dead.List(context.Background()); !IsKind(err, Unavailable) {
+		t.Fatalf("%v", err)
 	}
 }
