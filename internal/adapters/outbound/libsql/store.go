@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/primeintellect/mirage/internal/application/ports"
@@ -16,6 +17,11 @@ import (
 )
 
 const currentSchemaVersion = 1
+
+// Embedded libSQL applies PRAGMA foreign_keys per connection. A single owned
+// connection makes that invariant durable for every operation (and avoids a
+// pool silently issuing work on a connection without foreign-key enforcement).
+var openMigrationMu sync.Mutex
 
 // Store owns an embedded libSQL connection. It is safe for concurrent use.
 type Store struct{ db *sql.DB }
@@ -35,7 +41,16 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("libsql: connect: %w", err)
 	}
-	db.SetMaxOpenConns(8)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("libsql: enable foreign keys: %w", err)
+	}
+	// Serializes in-process simultaneous Open calls before schema DDL. The
+	// migration transaction remains safe against other processes.
+	openMigrationMu.Lock()
+	defer openMigrationMu.Unlock()
 	s := &Store{db: db}
 	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
@@ -71,7 +86,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		// Archive fields preserve lifecycle history while normal reads exclude deleted spaces.
 		stmts := []string{
 			`CREATE TABLE spaces (id TEXT PRIMARY KEY NOT NULL, alias TEXT NOT NULL UNIQUE, token_hash BLOB NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, deleted_at INTEGER)`,
-			`CREATE TABLE links (id TEXT PRIMARY KEY NOT NULL, space_id TEXT NOT NULL REFERENCES spaces(id), name TEXT NOT NULL, status TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, allocated_port INTEGER, process_identity TEXT, restart_count INTEGER NOT NULL DEFAULT 0, next_restart_at INTEGER, deleted_at INTEGER, UNIQUE(space_id, name))`,
+			`CREATE TABLE links (id TEXT PRIMARY KEY NOT NULL, space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE, name TEXT NOT NULL, status TEXT NOT NULL, command TEXT NOT NULL, folder TEXT NOT NULL, health_method TEXT NOT NULL, health_url TEXT NOT NULL, grace_ns INTEGER NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, allocated_port INTEGER, process_identity TEXT, restart_count INTEGER NOT NULL DEFAULT 0, next_restart_at INTEGER, deleted_at INTEGER, UNIQUE(space_id, name))`,
 			`CREATE INDEX links_by_expiry ON links(expires_at)`,
 			`CREATE INDEX links_by_reconcile ON links(status, expires_at)`,
 			`CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, space_id TEXT NOT NULL, link_id TEXT, action TEXT NOT NULL, reason TEXT NOT NULL)`,
@@ -198,7 +213,7 @@ func (r repository) CreateLink(c context.Context, v domain.Link) error {
 	// idempotency/concurrency decision.
 	var e error
 	for attempt := 0; attempt < 8; attempt++ {
-		_, e = r.q.ExecContext(c, `INSERT INTO links(id,space_id,name,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, v.ID, v.SpaceID, v.Name, v.Status, unix(v.ExpiresAt), now, now)
+		_, e = r.q.ExecContext(c, `INSERT INTO links(id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,created_at,updated_at,allocated_port,process_identity,restart_count,next_restart_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, v.ID, v.SpaceID, v.Name, v.Status, v.Command, v.Folder, v.HealthCheck.Method, v.HealthCheck.URL, int64(v.Grace), unix(v.ExpiresAt), now, now, nullablePort(v.AllocatedPort), nullableString(v.ProcessIdentity), v.RestartCount, nullableTime(v.NextRestartAt))
 		if e == nil || !contains(e.Error(), "database is locked") {
 			break
 		}
@@ -212,19 +227,50 @@ func (r repository) CreateLink(c context.Context, v domain.Link) error {
 }
 func scanLink(row interface{ Scan(...any) error }) (domain.Link, error) {
 	var x domain.Link
-	var exp int64
-	e := row.Scan(&x.ID, &x.SpaceID, &x.Name, &x.Status, &exp)
+	var expiry, grace int64
+	var port sql.NullInt64
+	var process sql.NullString
+	var next sql.NullInt64
+	e := row.Scan(&x.ID, &x.SpaceID, &x.Name, &x.Status, &x.Command, &x.Folder, &x.HealthCheck.Method, &x.HealthCheck.URL, &grace, &expiry, &port, &process, &x.RestartCount, &next)
 	if e != nil {
 		return x, translate(e, "link not found")
 	}
-	x.ExpiresAt = time.Unix(0, exp).UTC()
+	x.Grace, x.ExpiresAt = time.Duration(grace), time.Unix(0, expiry).UTC()
+	if port.Valid {
+		x.AllocatedPort = int(port.Int64)
+	}
+	if process.Valid {
+		x.ProcessIdentity = process.String
+	}
+	if next.Valid {
+		x.NextRestartAt = time.Unix(0, next.Int64).UTC()
+	}
 	return x, nil
 }
+func nullablePort(p int) any {
+	if p == 0 {
+		return nil
+	}
+	return p
+}
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return unix(t)
+}
+
 func (r repository) FindLink(c context.Context, s domain.SpaceID, n domain.LinkName) (domain.Link, error) {
-	return scanLink(r.q.QueryRowContext(c, `SELECT id,space_id,name,status,expires_at FROM links WHERE space_id=? AND name=? AND deleted_at IS NULL`, s, n))
+	return scanLink(r.q.QueryRowContext(c, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at FROM links WHERE space_id=? AND name=? AND deleted_at IS NULL`, s, n))
 }
 func (r repository) ListLinks(c context.Context, s domain.SpaceID) ([]domain.Link, error) {
-	rows, e := r.q.QueryContext(c, `SELECT id,space_id,name,status,expires_at FROM links WHERE space_id=? AND deleted_at IS NULL ORDER BY name`, s)
+	rows, e := r.q.QueryContext(c, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at FROM links WHERE space_id=? AND deleted_at IS NULL ORDER BY name`, s)
 	if e != nil {
 		return nil, e
 	}
@@ -240,7 +286,7 @@ func (r repository) ListLinks(c context.Context, s domain.SpaceID) ([]domain.Lin
 	return out, rows.Err()
 }
 func (r repository) SaveLink(c context.Context, v domain.Link) error {
-	res, e := r.q.ExecContext(c, `UPDATE links SET status=?,expires_at=?,updated_at=? WHERE id=? AND deleted_at IS NULL`, v.Status, unix(v.ExpiresAt), time.Now().UTC().UnixNano(), v.ID)
+	res, e := r.q.ExecContext(c, `UPDATE links SET status=?,command=?,folder=?,health_method=?,health_url=?,grace_ns=?,expires_at=?,updated_at=?,allocated_port=?,process_identity=?,restart_count=?,next_restart_at=? WHERE id=? AND deleted_at IS NULL`, v.Status, v.Command, v.Folder, v.HealthCheck.Method, v.HealthCheck.URL, int64(v.Grace), unix(v.ExpiresAt), time.Now().UTC().UnixNano(), nullablePort(v.AllocatedPort), nullableString(v.ProcessIdentity), v.RestartCount, nullableTime(v.NextRestartAt), v.ID)
 	if e != nil {
 		return e
 	}
@@ -262,14 +308,40 @@ func (r repository) DeleteLink(c context.Context, id domain.LinkID) error {
 	return nil
 }
 
+// ActiveSpaces returns non-archived spaces whose expiry is strictly after now.
+func (s *Store) ActiveSpaces(c context.Context, now time.Time) ([]domain.Space, error) {
+	return querySpaces(c, s.db, `SELECT id,alias,token_hash,expires_at FROM spaces WHERE deleted_at IS NULL AND expires_at>? ORDER BY expires_at,id`, unix(now))
+}
+
+// ExpiredSpaces returns non-archived spaces expiring at or before now.
+func (s *Store) ExpiredSpaces(c context.Context, now time.Time) ([]domain.Space, error) {
+	return querySpaces(c, s.db, `SELECT id,alias,token_hash,expires_at FROM spaces WHERE deleted_at IS NULL AND expires_at<=? ORDER BY expires_at,id`, unix(now))
+}
+func querySpaces(c context.Context, q runner, stmt string, args ...any) ([]domain.Space, error) {
+	rows, e := q.QueryContext(c, stmt, args...)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []domain.Space
+	for rows.Next() {
+		x, e := scanSpace(rows)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
 // ExpiredLinks returns live links whose expiry is at or before now, ordered to make cleanup deterministic.
 func (s *Store) ExpiredLinks(c context.Context, now time.Time) ([]domain.Link, error) {
-	return queryLinks(c, s.db, `SELECT id,space_id,name,status,expires_at FROM links WHERE deleted_at IS NULL AND expires_at<=? ORDER BY expires_at,id`, unix(now))
+	return queryLinks(c, s.db, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at FROM links WHERE deleted_at IS NULL AND expires_at<=? ORDER BY expires_at,id`, unix(now))
 }
 
 // ReconciliationLinks returns live, nonterminal links deterministically.
 func (s *Store) ReconciliationLinks(c context.Context, now time.Time) ([]domain.Link, error) {
-	return queryLinks(c, s.db, `SELECT id,space_id,name,status,expires_at FROM links WHERE deleted_at IS NULL AND expires_at>? AND status NOT IN (?,?) ORDER BY id`, unix(now), domain.StatusDeleted, domain.StatusExpired)
+	return queryLinks(c, s.db, `SELECT id,space_id,name,status,command,folder,health_method,health_url,grace_ns,expires_at,allocated_port,process_identity,restart_count,next_restart_at FROM links WHERE deleted_at IS NULL AND expires_at>? AND status NOT IN (?,?) ORDER BY id`, unix(now), domain.StatusDeleted, domain.StatusExpired)
 }
 func queryLinks(c context.Context, q runner, stmt string, args ...any) ([]domain.Link, error) {
 	rows, e := q.QueryContext(c, stmt, args...)

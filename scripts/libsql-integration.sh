@@ -5,4 +5,4 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 : "${CGO_ENABLED:=1}"
 export CGO_ENABLED
-go test -count=1 -run 'Test(OpenMigratesAndReopens|TokenHashOnlyAndSpaceQueries|LinksConcurrentUniqueScope|DeleteSpaceArchivesLinksTransactionally|WithinRollbackAndSaveDelete|ExpiryReconcileAndAudit)' -v ./internal/adapters/outbound/libsql
+go test -count=1 -v ./internal/adapters/outbound/libsql

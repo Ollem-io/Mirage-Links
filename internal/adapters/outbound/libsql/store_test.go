@@ -284,3 +284,119 @@ func TestConstraintAndSQLShape(t *testing.T) {
 	}
 	_ = sql.ErrNoRows
 }
+
+func TestLinkLifecycleMetadataRoundTrip(t *testing.T) {
+	s := testStore(t)
+	c := context.Background()
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	if e := s.CreateSpace(c, space("s", "alpha", now.Add(time.Hour))); e != nil {
+		t.Fatal(e)
+	}
+	l := link("l", "s", "api", now.Add(time.Hour))
+	l.Status = domain.StatusActive
+	l.Command = "serve --port {port}"
+	l.Folder = "/tmp/app"
+	l.HealthCheck = domain.HealthCheck{Method: domain.HealthGET, URL: "http://127.0.0.1:4567/health"}
+	l.Grace = 7 * time.Second
+	l.AllocatedPort = 4567
+	l.ProcessIdentity = "pid:123"
+	l.RestartCount = 3
+	l.NextRestartAt = now.Add(time.Minute)
+	if e := s.CreateLink(c, l); e != nil {
+		t.Fatal(e)
+	}
+	got, e := s.FindLink(c, "s", "api")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if got.Command != l.Command || got.Folder != l.Folder || got.HealthCheck != l.HealthCheck || got.Grace != l.Grace || got.AllocatedPort != l.AllocatedPort || got.ProcessIdentity != l.ProcessIdentity || got.RestartCount != 3 || !got.NextRestartAt.Equal(l.NextRestartAt) {
+		t.Fatalf("metadata lost: %#v", got)
+	}
+	got.Status = domain.StatusFailed
+	got.ProcessIdentity = ""
+	got.AllocatedPort = 0
+	got.RestartCount = 4
+	got.NextRestartAt = time.Time{}
+	if e := s.SaveLink(c, got); e != nil {
+		t.Fatal(e)
+	}
+	got, e = s.FindLink(c, "s", "api")
+	if e != nil || got.Status != domain.StatusFailed || got.ProcessIdentity != "" || got.AllocatedPort != 0 || got.RestartCount != 4 || !got.NextRestartAt.IsZero() {
+		t.Fatalf("save metadata: %#v %v", got, e)
+	}
+}
+func TestForeignKeysRejectOrphansAndCascade(t *testing.T) {
+	s := testStore(t)
+	c := context.Background()
+	now := time.Now()
+	// Repository insert proves foreign keys are enabled on Store's only connection.
+	e := s.CreateLink(c, link("orphan", "does-not-exist", "api", now.Add(time.Hour)))
+	if e == nil {
+		t.Fatal("orphan link accepted")
+	}
+	if e := s.CreateSpace(c, space("s", "alpha", now.Add(time.Hour))); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.CreateLink(c, link("l", "s", "api", now.Add(time.Hour))); e != nil {
+		t.Fatal(e)
+	}
+	// Physical deletion is deliberately tested separately from the adapter's
+	// lifecycle archive operation and demonstrates database-level cascade safety.
+	if _, e := s.db.ExecContext(c, `DELETE FROM spaces WHERE id=?`, "s"); e != nil {
+		t.Fatal(e)
+	}
+	var n int
+	if e := s.db.QueryRow(`SELECT count(*) FROM links WHERE id='l'`).Scan(&n); e != nil || n != 0 {
+		t.Fatalf("cascade count=%d err=%v", n, e)
+	}
+}
+func TestSpaceBoundaryQueriesAndConcurrentOpen(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "state.db")
+	// All calls race to initialize the same previously absent database.
+	const workers = 5
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	stores := make(chan *Store, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			x, e := Open(path)
+			if e == nil {
+				stores <- x
+			}
+			errs <- e
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(stores)
+	for e := range errs {
+		if e != nil {
+			t.Fatalf("concurrent Open: %v", e)
+		}
+	}
+	var s *Store
+	for x := range stores {
+		if s == nil {
+			s = x
+		} else {
+			x.Close()
+		}
+	}
+	defer s.Close()
+	for _, x := range []domain.Space{space("at", "at", now), space("before", "before", now.Add(-time.Nanosecond)), space("after", "after", now.Add(time.Nanosecond))} {
+		if e := s.CreateSpace(context.Background(), x); e != nil {
+			t.Fatal(e)
+		}
+	}
+	active, e := s.ActiveSpaces(context.Background(), now)
+	if e != nil || len(active) != 1 || active[0].ID != "after" {
+		t.Fatalf("active %#v %v", active, e)
+	}
+	expired, e := s.ExpiredSpaces(context.Background(), now)
+	if e != nil || len(expired) != 2 || expired[0].ID != "before" || expired[1].ID != "at" {
+		t.Fatalf("expired %#v %v", expired, e)
+	}
+}
