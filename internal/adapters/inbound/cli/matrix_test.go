@@ -288,3 +288,37 @@ func TestHostilePathNamesRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestTakeTokenDirect(t *testing.T) {
+	var o, e bytes.Buffer
+	c := New(&o, &e, func() string { return "v" })
+	a := []string{"--token", "one", "--token", "two", "rest"}
+	tok, err := c.takeToken(&a)
+	if err != nil || tok != "two" || len(a) != 1 {
+		t.Fatal(tok, a, err)
+	}
+	a = []string{"--token"}
+	if _, err = c.takeToken(&a); err == nil {
+		t.Fatal()
+	}
+}
+func TestMoreCommandBranches(t *testing.T) {
+	cases := [][]string{{"space", "create", "--wat", "x"}, {"space", "list", "--json", "extra", "two"}, {"link", "create", "--command"}, {"link", "logs", "api", "--token", "t", "--tail", "bad"}}
+	for _, a := range cases {
+		var o, e bytes.Buffer
+		c := New(&o, &e, func() string { return "v" })
+		_ = c.Execute(a)
+	}
+}
+
+func TestDirectRequestConstructionFailures(t *testing.T) {
+	var o, e bytes.Buffer
+	c := New(&o, &e, func() string { return "v" })
+	if c.request("://bad", "GET", "/", "", nil, false, func(map[string]any) {}) == 0 {
+		t.Fatal()
+	}
+	c.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, context.Canceled })}
+	if c.follow("http://x", "/", "t") == 0 {
+		t.Fatal()
+	}
+}
