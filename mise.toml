@@ -89,3 +89,14 @@ run = "./scripts/mir06-scenario.sh"
 [tasks.coverage-mir06]
 description = "Enforce MIR-06 application coverage"
 run = "./scripts/coverage_mir06.sh"
+
+[tasks.api-conformance]
+description = "Run MIR-07 random-port private API conformance artifact"
+run = "./scripts/api-conformance.sh"
+
+[tasks.coverage-mir07]
+description = "Enforce MIR-07 HTTP API package coverage"
+run = '''set -eu
+go test -coverprofile=/tmp/mirage-httpapi.cover ./internal/adapters/inbound/httpapi
+go tool cover -func=/tmp/mirage-httpapi.cover | awk '/^total:/ {gsub(/%/, "", $3); if ($3 < 90) exit 1}'
+'''
