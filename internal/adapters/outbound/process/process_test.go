@@ -21,6 +21,12 @@ import (
 
 func buildFixture(t *testing.T) string {
 	t.Helper()
+	if prebuilt := os.Getenv("MIRAGE_TEST_SERVICE"); prebuilt != "" {
+		if _, err := os.Stat(prebuilt); err != nil {
+			t.Fatalf("prebuilt fixture: %v", err)
+		}
+		return prebuilt
+	}
 	out := filepath.Join(t.TempDir(), "service")
 	cmd := exec.Command("go", "build", "-o", out, "./testdata/service")
 	cmd.Dir = "."
@@ -378,5 +384,51 @@ func TestAdditionalCanceledBranches(t *testing.T) {
 	}
 	if err := a.Release(context.Background(), p); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCompetitorListenerNeverAcceptedAsChildOwnership(t *testing.T) {
+	fixture := buildFixture(t)
+	for i := 0; i < 100; i++ {
+		a := NewAllocator()
+		var competitor net.Listener
+		a.afterRelease = func(p ports.Port) {
+			var err error
+			competitor, err = net.Listen("tcp4", net.JoinHostPort(p.Address, strconv.Itoa(p.Number)))
+			if err != nil {
+				t.Fatalf("iteration %d steal: %v", i, err)
+			}
+		}
+		s := NewSupervisor(nil)
+		_, _, err := s.startAllocated(context.Background(), a, ports.StartRequest{Folder: t.TempDir(), Command: fixture + " never-bind"}, 1, 100*time.Millisecond)
+		_ = competitor.Close()
+		if err == nil || !strings.Contains(err.Error(), "not owned") {
+			t.Fatalf("iteration %d competitor accepted: %v", i, err)
+		}
+		if len(s.procs) != 0 {
+			t.Fatalf("iteration %d ownership leak", i)
+		}
+	}
+}
+
+func TestListenerOwnershipHelpers(t *testing.T) {
+	if !procLoopback("0100007F") || !procLoopback("00000000000000000000000001000000") || procLoopback("00000000") {
+		t.Fatal("loopback parser")
+	}
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	owned, listening, err := ownsLoopbackListener(syscall.Getpgrp(), l.Addr().(*net.TCPAddr).Port)
+	if err != nil || !owned || !listening {
+		t.Fatalf("owned=%v listening=%v err=%v", owned, listening, err)
+	}
+	owned, listening, err = ownsLoopbackListener(syscall.Getpgrp()+999999, l.Addr().(*net.TCPAddr).Port)
+	if err != nil || owned || !listening {
+		t.Fatalf("competitor classification %v %v %v", owned, listening, err)
+	}
+	if _, err := identityPID(ports.ProcessIdentity{Value: "bad"}); err == nil {
+		t.Fatal("bad identity")
 	}
 }

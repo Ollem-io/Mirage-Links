@@ -3,8 +3,8 @@ package process
 import (
 	"context"
 	"fmt"
-	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/primeintellect/mirage/internal/application/ports"
@@ -65,46 +65,45 @@ func (s *Supervisor) waitBound(ctx context.Context, id ports.ProcessIdentity, p 
 	defer deadline.Stop()
 	tick := time.NewTicker(bindPollInterval)
 	defer tick.Stop()
-	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(p.Number))
+	pgid, err := identityPID(id)
+	if err != nil {
+		return err
+	}
+	var ownershipErr error
 	for {
-		conn, err := (&net.Dialer{Timeout: bindPollInterval}).DialContext(ctx, "tcp4", address)
-		if err == nil {
-			_ = conn.Close()
-			// A competing listener may win the release window. Require the
-			// launched process to remain alive and the endpoint to remain bound
-			// across a settling interval; a child whose bind failed exits here.
-			timer := time.NewTimer(bindPollInterval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
-			}
-			alive, aliveErr := s.Alive(ctx, id)
-			if aliveErr != nil {
-				return aliveErr
-			}
-			if alive {
-				confirm, confirmErr := (&net.Dialer{Timeout: bindPollInterval}).DialContext(ctx, "tcp4", address)
-				if confirmErr == nil {
-					_ = confirm.Close()
-					return nil
-				}
-			}
+		owned, listening, err := ownsLoopbackListener(pgid, p.Number)
+		if err != nil {
+			ownershipErr = err
+		} else if owned {
+			return nil
+		} else if listening {
+			return fmt.Errorf("port %d listener is not owned by process group %d", p.Number, pgid)
 		}
 		alive, aliveErr := s.Alive(ctx, id)
 		if aliveErr != nil {
 			return aliveErr
 		}
 		if !alive {
-			return fmt.Errorf("child exited before binding %s", address)
+			return fmt.Errorf("child exited before binding 127.0.0.1:%d", p.Number)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("child did not bind %s within %s", address, grace)
+			if ownershipErr != nil {
+				return fmt.Errorf("verify listener ownership: %w", ownershipErr)
+			}
+			return fmt.Errorf("child did not bind 127.0.0.1:%d within %s", p.Number, grace)
 		case <-tick.C:
 		}
 	}
+}
+
+func identityPID(id ports.ProcessIdentity) (int, error) {
+	parts := strings.SplitN(id.Value, ":", 2)
+	pid, err := strconv.Atoi(parts[0])
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("invalid process identity %q", id.Value)
+	}
+	return pid, nil
 }

@@ -13,6 +13,6 @@ set +e; PORT=$(free_port) "$tmp/service" crash; code=$?; set -e; [ "$code" = 17 
 setsid env PORT=$(free_port) "$tmp/service" fork >"$tmp/fork.out" 2>&1 & leader=$!; pids=$leader; sleep .1; child=$(awk '/child/{print $2}' "$tmp/fork.out"); kill -KILL -$leader; wait $leader 2>/dev/null || true; sleep .02; ! kill -0 "$child" 2>/dev/null || [ "$(awk '{print $3}' /proc/$child/stat 2>/dev/null || echo X)" = Z ]; pids=""
 setsid env PORT=$(free_port) "$tmp/service" ignore >/dev/null 2>&1 & pid=$!; pids=$pid; sleep .03; kill -TERM -$pid; sleep .03; kill -0 $pid; kill -KILL -$pid; wait $pid 2>/dev/null || true; pids=""
 PORT=$(free_port) LINES=200 "$tmp/service" noisy >"$tmp/noisy.out" 2>"$tmp/noisy.err"; grep -q stdout "$tmp/noisy.out"; grep -q stderr "$tmp/noisy.err"
-go test -count=1 ./internal/adapters/outbound/process ./internal/adapters/outbound/health ./internal/adapters/outbound/logs
+MIRAGE_TEST_SERVICE="$tmp/service" go test -count=1 ./internal/adapters/outbound/process ./internal/adapters/outbound/health ./internal/adapters/outbound/logs
 after_fd=$(find /proc/$$/fd -mindepth 1 -maxdepth 1 | wc -l); after_tasks=$(find /proc/$$/task -mindepth 1 -maxdepth 1 | wc -l); [ "$after_fd" -le "$base_fd" ]; [ "$after_tasks" -le "$base_tasks" ]
 printf 'MIR-05 process artifact PASS (process/port/goroutine/fd checks)\n'
