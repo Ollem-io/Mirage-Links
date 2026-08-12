@@ -215,7 +215,7 @@ func (s *Service) CreateLink(ctx context.Context, in CreateLinkInput) (CreateLin
 	if in.HealthCheck.Method == "" || in.HealthCheck.URL == "" {
 		return CreateLinkResult{}, domain.NewValidation("health_check", "must be METHOD URL")
 	}
-	if _, e = domain.ParseHealthCheck(string(in.HealthCheck.Method) + " " + in.HealthCheck.URL); e != nil {
+	if _, e = domain.ParseHealthCheck(string(in.HealthCheck.Method) + " " + strings.ReplaceAll(in.HealthCheck.URL, "{port}", "1")); e != nil {
 		return CreateLinkResult{}, e
 	}
 	ttl := in.TTL
