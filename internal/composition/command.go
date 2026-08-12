@@ -7,8 +7,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,6 +96,14 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 	if adminURL == "" {
 		adminURL = "http://127.0.0.1:2019"
 	}
+	adminListen := ""
+	if managed {
+		adminListen, e = managedAdminListen(adminURL)
+		if e != nil {
+			store.Close()
+			return nil, e
+		}
+	}
 	p, e := caddy.New(caddy.Config{AdminURL: adminURL})
 	if e != nil {
 		store.Close()
@@ -107,7 +117,7 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 			binary = "caddy"
 		}
 		configPath := filepath.Join(filepath.Dir(o.DataPath), "mirage-caddy.json")
-		cfg := fmt.Sprintf(`{"admin":{"listen":"127.0.0.1:2019"},"apps":{"http":{"servers":{"srv0":{"listen":[%q],"routes":[]}}}}}`, o.PublicAddress)
+		cfg := fmt.Sprintf(`{"admin":{"listen":%q},"apps":{"http":{"servers":{"srv0":{"listen":[%q],"routes":[]}}}}}`, adminListen, o.PublicAddress)
 		if e = os.WriteFile(configPath, []byte(cfg), 0600); e != nil {
 			store.Close()
 			return nil, e
@@ -190,6 +200,27 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 	}
 	return stop, nil
 }
+
+func managedAdminListen(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return "", domain.NewValidation("caddy.admin_url", "managed mode requires http://loopback:port with no path")
+	}
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil || port == "" {
+		return "", domain.NewValidation("caddy.admin_url", "managed mode requires an explicit port")
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		return "", domain.NewValidation("caddy.admin_url", "managed mode requires a loopback host")
+	}
+	var n int
+	if _, err = fmt.Sscan(port, &n); err != nil || n < 1 || n > 65535 {
+		return "", domain.NewValidation("caddy.admin_url", "managed mode requires a valid port")
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
 func portNumber(addr string) int {
 	_, p, e := netSplit(addr)
 	if e != nil {

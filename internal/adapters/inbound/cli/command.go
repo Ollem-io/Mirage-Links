@@ -51,114 +51,32 @@ func (c Command) usageError(s string) int {
 	fmt.Fprintf(c.stderr, "mirage: %s\nRun 'mirage --help' for usage.\n", s)
 	return 2
 }
+
+type exitError struct{ code int }
+
+func (e exitError) Error() string { return "command failed" }
+
 func (c Command) Execute(args []string) int {
-	// Cobra owns the command vocabulary and help metadata. Argument resolution
-	// remains injectable below so HTTP behavior can be tested without a process.
-	root := &cobra.Command{Use: "mirage", SilenceUsage: true, SilenceErrors: true}
-	root.PersistentFlags().String("server", "", "private Mirage server URL")
-	root.PersistentFlags().String("token", "", "space bearer token")
-	root.PersistentFlags().Bool("json", false, "emit JSON")
-	root.PersistentFlags().String("config", "", "configuration file")
-	_ = root
-	args = expandEquals(args)
-	if containsHelp(args) {
-		root := c.cobraTree()
-		root.SetOut(c.stdout)
-		root.SetErr(c.stderr)
-		root.SetArgs(args)
-		if err := root.Execute(); err != nil {
-			return c.usageError(err.Error())
+	root := c.cobraTree()
+	root.SetOut(c.stdout)
+	root.SetErr(c.stderr)
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		if x, ok := err.(exitError); ok {
+			return x.code
 		}
-		return 0
+		return c.usageError(err.Error())
 	}
-	if len(args) == 0 {
-		c.help()
-		return 0
-	}
-	// Persistent globals may appear before or after subcommands, exactly like
-	// Cobra persistent flags. Remove them before subcommand-specific parsing.
-	cfgPath, server, globalToken, jsonOut := "", "", "", false
-	remaining := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--server", "--token", "--config":
-			if i+1 >= len(args) {
-				return c.usageError(args[i] + " requires a value")
-			}
-			v := args[i+1]
-			i++
-			switch args[i-1] {
-			case "--server":
-				server = v
-			case "--token":
-				globalToken = v
-			case "--config":
-				cfgPath = v
-			}
-		case "--json":
-			jsonOut = true
-		default:
-			remaining = append(remaining, args[i])
-		}
-	}
-	args = remaining
-	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
-		if len(args) == 1 {
-			c.help()
-			return 0
-		}
-		return c.usageError("help does not accept arguments")
-	}
-	if len(args) > 0 && (args[0] == "--version" || args[0] == "-v" || args[0] == "version") {
-		if len(args) == 1 {
-			fmt.Fprintf(c.stdout, "mirage %s\n", c.version())
-			return 0
-		}
-		return c.usageError("version does not accept arguments")
-	}
-	if len(args) == 0 {
-		c.help()
-		return 0
-	}
-	// start also accepts its configuration flag after the command word.
-	if args[0] == "start" {
-		for i := 1; i+1 < len(args); i += 2 {
-			if args[i] == "--config" {
-				cfgPath = args[i+1]
-			}
-		}
-	}
-	conf, err := loadConfig(cfgPath, c.getenv, c.getwd)
-	if err != nil {
-		fmt.Fprintln(c.stderr, "mirage:", err)
-		return 1
-	}
-	if server == "" {
-		server = c.getenv("MIRAGE_SERVER")
-	}
-	if server == "" {
-		server = conf.PrivateAddress
-	}
-	if server == "" {
-		server = "http://127.0.0.1:9956"
-	}
-	server = strings.TrimRight(server, "/")
-	if !strings.Contains(server, "://") {
-		server = "http://" + server
-	}
-	c.forcedToken = globalToken
-	if args[0] == "start" {
-		return c.doStart(args[1:], conf, cfgPath)
-	}
-	switch args[0] {
-	case "space":
-		return c.space(args[1:], server, jsonOut, conf)
-	case "link":
-		return c.link(args[1:], server, jsonOut, conf)
-	default:
-		return c.usageError(fmt.Sprintf("unknown command %q", args[0]))
-	}
+	return 0
 }
+
+func commandResult(code int) error {
+	if code == 0 {
+		return nil
+	}
+	return exitError{code: code}
+}
+
 func (c Command) doStart(a []string, conf config, path string) int {
 	if c.start == nil {
 		return c.fail(fmt.Errorf("start is unavailable"))
@@ -609,67 +527,194 @@ func (c Command) printRows(v map[string]any, key string, fields []string) {
 	}
 }
 
-func containsHelp(args []string) bool {
-	for _, a := range args {
-		if a == "--help" || a == "-h" {
-			return true
-		}
-	}
-	return false
-}
-
-// expandEquals accepts the standard pflag/Cobra --flag=value spelling.
-func expandEquals(in []string) []string {
-	out := make([]string, 0, len(in))
-	for _, a := range in {
-		if k, v, ok := strings.Cut(a, "="); ok && (k == "--server" || k == "--token" || k == "--config" || k == "--public" || k == "--private" || k == "--ttl" || k == "--alias" || k == "--name" || k == "--command" || k == "--execution-folder" || k == "--health-check" || k == "--grace" || k == "--tail" || k == "--force") {
-			out = append(out, k, v)
-		} else {
-			out = append(out, a)
-		}
-	}
-	return out
-}
-
-func (c Command) help() {
-	root := c.cobraTree()
-	root.SetOut(c.stdout)
-	_ = root.Help()
-}
-
-// cobraTree is the canonical command/flag contract used for generated help and
-// shell completion. Execution delegates to the HTTP handlers above so they stay
-// independently testable.
+// cobraTree is the executing command tree. Cobra owns parsing, validation,
+// help, and dispatch; the leaf handlers perform only API/start behavior.
 func (c Command) cobraTree() *cobra.Command {
-	root := &cobra.Command{Use: "mirage", Short: "Mirage manages temporary local application environments", Run: func(*cobra.Command, []string) {}}
-	root.PersistentFlags().String("server", "", "private Mirage server URL")
-	root.PersistentFlags().String("token", "", "space bearer token")
-	root.PersistentFlags().Bool("json", false, "emit JSON")
-	start := &cobra.Command{Use: "start", Short: "Start Mirage", Run: func(*cobra.Command, []string) {}}
-	start.Flags().String("public", "9955", "public port/address")
-	start.Flags().String("private", "9956", "private port/address")
-	start.Flags().String("config", "", "configuration file")
-	space := &cobra.Command{Use: "space", Short: "Manage spaces"}
-	spaceCreate := &cobra.Command{Use: "create", Short: "create a space", Run: func(*cobra.Command, []string) {}}
-	spaceCreate.Flags().String("ttl", "", "space TTL")
-	spaceCreate.Flags().String("alias", "", "space alias")
-	spaceList := &cobra.Command{Use: "list [alias]", Short: "list spaces", Args: cobra.MaximumNArgs(1), Run: func(*cobra.Command, []string) {}}
-	spaceDelete := &cobra.Command{Use: "delete <alias>", Short: "delete a space", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) {}}
-	spaceDelete.Flags().String("force", "", "administrative audit reason")
-	space.AddCommand(spaceCreate, spaceList, spaceDelete)
-	link := &cobra.Command{Use: "link", Short: "Manage links"}
-	linkCreate := &cobra.Command{Use: "create", Short: "create a link", Run: func(*cobra.Command, []string) {}}
-	for _, f := range []string{"name", "command", "execution-folder", "health-check", "grace", "ttl"} {
-		linkCreate.Flags().String(f, "", f)
+	var server, token, cfgPath string
+	var jsonOut bool
+	root := &cobra.Command{
+		Use: "mirage", Short: "Mirage manages temporary local application environments",
+		SilenceUsage: true, SilenceErrors: true,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
-	linkCreate.Flags().Bool("restarts", false, "automatic restarts")
-	linkList := &cobra.Command{Use: "list", Short: "list links", Run: func(*cobra.Command, []string) {}}
-	linkLogs := &cobra.Command{Use: "logs <name>", Short: "show link logs", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) {}}
-	linkLogs.Flags().Int("tail", 100, "lines to show")
-	linkLogs.Flags().Bool("follow", false, "follow logs")
-	linkRestart := &cobra.Command{Use: "restart <name>", Short: "restart a link", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) {}}
-	linkDelete := &cobra.Command{Use: "delete <name>", Short: "delete a link", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) {}}
-	link.AddCommand(linkCreate, linkList, linkLogs, linkRestart, linkDelete)
+	root.PersistentFlags().StringVar(&server, "server", "", "private Mirage server URL")
+	root.PersistentFlags().StringVar(&token, "token", "", "space bearer token")
+	root.PersistentFlags().BoolVar(&jsonOut, "json", false, "emit JSON")
+	root.PersistentFlags().StringVar(&cfgPath, "config", "", "configuration file")
+	root.Flags().BoolP("version", "v", false, "print version")
+	root.PreRunE = func(cmd *cobra.Command, _ []string) error {
+		v, _ := cmd.Flags().GetBool("version")
+		if v {
+			fmt.Fprintf(c.stdout, "mirage %s\n", c.version())
+			return exitError{code: 0}
+		}
+		return nil
+	}
+	// Cobra treats a successful sentinel like an error, so version is a real command
+	// and --version is handled before Execute below via a root flag callback.
+	root.RunE = func(cmd *cobra.Command, _ []string) error {
+		v, _ := cmd.Flags().GetBool("version")
+		if v {
+			fmt.Fprintf(c.stdout, "mirage %s\n", c.version())
+			return nil
+		}
+		return cmd.Help()
+	}
+	root.SetHelpCommand(&cobra.Command{Use: "help", Args: func(*cobra.Command, []string) error { return nil }, RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			return fmt.Errorf("help does not accept arguments")
+		}
+		return root.Help()
+	}})
+	root.AddCommand(&cobra.Command{Use: "version", Args: func(_ *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			return fmt.Errorf("version does not accept arguments")
+		}
+		return nil
+	}, Run: func(*cobra.Command, []string) { fmt.Fprintf(c.stdout, "mirage %s\n", c.version()) }})
+
+	resolve := func() (config, string, error) {
+		conf, err := loadConfig(cfgPath, c.getenv, c.getwd)
+		if err != nil {
+			return conf, "", err
+		}
+		base := server
+		if base == "" {
+			base = c.getenv("MIRAGE_SERVER")
+		}
+		if base == "" {
+			base = conf.PrivateAddress
+		}
+		if base == "" {
+			base = "http://127.0.0.1:9956"
+		}
+		base = strings.TrimRight(base, "/")
+		if !strings.Contains(base, "://") {
+			base = "http://" + base
+		}
+		c.forcedToken = token
+		return conf, base, nil
+	}
+	failResolve := func(err error) error { return commandResult(c.fail(err)) }
+
+	var public, private string
+	start := &cobra.Command{Use: "start", Short: "Start Mirage", Args: cobra.NoArgs}
+	start.Flags().StringVar(&public, "public", "", "public port/address")
+	start.Flags().StringVar(&private, "private", "", "private port/address")
+	start.RunE = func(cmd *cobra.Command, _ []string) error {
+		conf, _, err := resolve()
+		if err != nil {
+			return failResolve(err)
+		}
+		a := []string{}
+		if cmd.Flags().Changed("public") {
+			a = append(a, "--public", public)
+		}
+		if cmd.Flags().Changed("private") {
+			a = append(a, "--private", private)
+		}
+		return commandResult(c.doStart(a, conf, cfgPath))
+	}
+
+	space := &cobra.Command{Use: "space", Short: "Manage spaces", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error { return fmt.Errorf("space requires a subcommand") }}
+	var ttl, alias, force string
+	spaceCreate := &cobra.Command{Use: "create", Short: "create a space", Args: cobra.NoArgs}
+	spaceCreate.Flags().StringVar(&ttl, "ttl", "", "space TTL")
+	spaceCreate.Flags().StringVar(&alias, "alias", "", "space alias")
+	spaceCreate.RunE = func(*cobra.Command, []string) error {
+		conf, base, err := resolve()
+		if err != nil {
+			return failResolve(err)
+		}
+		a := []string{"create"}
+		if ttl != "" {
+			a = append(a, "--ttl", ttl)
+		}
+		if alias != "" {
+			a = append(a, "--alias", alias)
+		}
+		return commandResult(c.space(a, base, jsonOut, conf))
+	}
+	spaceList := &cobra.Command{Use: "list [alias]", Short: "list spaces", Args: cobra.MaximumNArgs(1), RunE: func(_ *cobra.Command, a []string) error {
+		conf, base, err := resolve()
+		if err != nil {
+			return failResolve(err)
+		}
+		return commandResult(c.space(append([]string{"list"}, a...), base, jsonOut, conf))
+	}}
+	spaceDelete := &cobra.Command{Use: "delete <alias>", Short: "delete a space", Args: cobra.ExactArgs(1)}
+	spaceDelete.Flags().StringVar(&force, "force", "", "administrative audit reason")
+	spaceDelete.RunE = func(_ *cobra.Command, a []string) error {
+		conf, base, err := resolve()
+		if err != nil {
+			return failResolve(err)
+		}
+		x := []string{"delete", a[0]}
+		if force != "" {
+			x = append(x, "--force", force)
+		}
+		return commandResult(c.space(x, base, jsonOut, conf))
+	}
+	space.AddCommand(spaceCreate, spaceList, spaceDelete)
+
+	link := &cobra.Command{Use: "link", Short: "Manage links", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error { return fmt.Errorf("link requires a subcommand") }}
+	var name, command, folder, healthCheck, grace, linkTTL string
+	var restarts bool
+	linkCreate := &cobra.Command{Use: "create", Short: "create a link", Args: cobra.NoArgs}
+	for n, target := range map[string]*string{"name": &name, "command": &command, "execution-folder": &folder, "health-check": &healthCheck, "grace": &grace, "ttl": &linkTTL} {
+		linkCreate.Flags().StringVar(target, n, "", n)
+	}
+	linkCreate.Flags().BoolVar(&restarts, "restarts", false, "automatic restarts")
+	linkCreate.RunE = func(*cobra.Command, []string) error {
+		conf, base, err := resolve()
+		if err != nil {
+			return failResolve(err)
+		}
+		a := []string{"create"}
+		for _, x := range [][2]string{{"name", name}, {"command", command}, {"execution-folder", folder}, {"health-check", healthCheck}, {"grace", grace}, {"ttl", linkTTL}} {
+			if x[1] != "" {
+				a = append(a, "--"+x[0], x[1])
+			}
+		}
+		if restarts {
+			a = append(a, "--restarts")
+		}
+		return commandResult(c.link(a, base, jsonOut, conf))
+	}
+	linkList := &cobra.Command{Use: "list", Short: "list links", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
+		conf, base, err := resolve()
+		if err != nil {
+			return failResolve(err)
+		}
+		return commandResult(c.link([]string{"list"}, base, jsonOut, conf))
+	}}
+	var tail int
+	var follow bool
+	linkLogs := &cobra.Command{Use: "logs <name>", Short: "show link logs", Args: cobra.ExactArgs(1)}
+	linkLogs.Flags().IntVar(&tail, "tail", 100, "lines to show")
+	linkLogs.Flags().BoolVar(&follow, "follow", false, "follow logs")
+	linkLogs.RunE = func(_ *cobra.Command, a []string) error {
+		conf, base, err := resolve()
+		if err != nil {
+			return failResolve(err)
+		}
+		x := []string{"logs", a[0], "--tail", strconv.Itoa(tail)}
+		if follow {
+			x = append(x, "--follow")
+		}
+		return commandResult(c.link(x, base, jsonOut, conf))
+	}
+	leaf := func(verb string) *cobra.Command {
+		return &cobra.Command{Use: verb + " <name>", Short: verb + " a link", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, a []string) error {
+			conf, base, err := resolve()
+			if err != nil {
+				return failResolve(err)
+			}
+			return commandResult(c.link([]string{verb, a[0]}, base, jsonOut, conf))
+		}}
+	}
+	link.AddCommand(linkCreate, linkList, linkLogs, leaf("restart"), leaf("delete"))
 	root.AddCommand(start, space, link)
 	return root
 }
