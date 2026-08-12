@@ -38,13 +38,14 @@ type Command struct {
 	getenv         func(string) string
 	getwd          func() (string, error)
 	forcedToken    string
+	waitSignal     func()
 }
 
 func New(stdout, stderr io.Writer, version VersionSource) Command {
 	return NewWithStart(stdout, stderr, version, nil)
 }
 func NewWithStart(stdout, stderr io.Writer, version VersionSource, start StartFunc) Command {
-	return Command{stdout: stdout, stderr: stderr, version: version, http: &http.Client{Timeout: 30 * time.Second}, start: start, getenv: os.Getenv, getwd: os.Getwd}
+	return Command{stdout: stdout, stderr: stderr, version: version, http: &http.Client{Timeout: 30 * time.Second}, start: start, getenv: os.Getenv, getwd: os.Getwd, waitSignal: waitForSignal}
 }
 func (c Command) usageError(s string) int {
 	fmt.Fprintf(c.stderr, "mirage: %s\nRun 'mirage --help' for usage.\n", s)
@@ -175,9 +176,7 @@ func (c Command) doStart(a []string, conf config, path string) int {
 	}
 	fmt.Fprintf(c.stdout, "Mirage ready: private %s public %s\n", o.PrivateAddress, o.PublicAddress)
 	// A running server is intentionally foreground. SIGINT/SIGTERM ends it cleanly.
-	sig := make(chan os.Signal, 1)
-	signalNotify(sig)
-	<-sig
+	c.waitSignal()
 	if e = stop(); e != nil {
 		return c.fail(e)
 	}
@@ -230,7 +229,10 @@ func (c Command) space(a []string, base string, jout bool, conf config) int {
 			if len(a) != 1 {
 				return c.usageError("space list accepts at most one alias")
 			}
-			path += "/" + a[0]
+			if _, e := domain.ParseAlias(a[0]); e != nil {
+				return c.fail(e)
+			}
+			path += "/" + url.PathEscape(a[0])
 		}
 		return c.request(base, "GET", path, "", nil, jout, func(v map[string]any) { c.printRows(v, "spaces", []string{"alias", "expires_at"}) })
 	case "delete":
@@ -238,6 +240,9 @@ func (c Command) space(a []string, base string, jout bool, conf config) int {
 			return c.usageError("space delete requires an alias")
 		}
 		alias := a[0]
+		if _, e := domain.ParseAlias(alias); e != nil {
+			return c.fail(e)
+		}
 		a = a[1:]
 		tok, force, reason := "", false, ""
 		for len(a) > 0 {
@@ -337,6 +342,9 @@ func (c Command) link(a []string, base string, jout bool, conf config) int {
 			return c.usageError("link logs requires a name")
 		}
 		name := a[0]
+		if _, e := domain.ParseLinkName(name); e != nil {
+			return c.fail(e)
+		}
 		a = a[1:]
 		follow := false
 		tail := 100
@@ -368,7 +376,7 @@ func (c Command) link(a []string, base string, jout bool, conf config) int {
 		if e != nil {
 			return c.fail(e)
 		}
-		path := fmt.Sprintf("/api/v1/links/%s/logs?tail=%d", name, tail)
+		path := fmt.Sprintf("/api/v1/links/%s/logs?tail=%d", url.PathEscape(name), tail)
 		if follow {
 			path += "&follow=true"
 			return c.follow(base, path, tok)
@@ -379,6 +387,9 @@ func (c Command) link(a []string, base string, jout bool, conf config) int {
 			return c.usageError("link " + sub + " requires a name")
 		}
 		name := a[0]
+		if _, e := domain.ParseLinkName(name); e != nil {
+			return c.fail(e)
+		}
 		a = a[1:]
 		if e := popToken(); e != nil {
 			return c.fail(e)
@@ -482,6 +493,16 @@ func (c Command) request(base, method, path, tok string, payload any, jout bool,
 func (c Command) follow(base, path, tok string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	sig := make(chan os.Signal, 1)
+	signalNotify(sig)
+	defer signalStop(sig)
+	go func() {
+		select {
+		case <-sig:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	req, e := http.NewRequestWithContext(ctx, "GET", base+path, nil)
 	if e != nil {
 		return c.fail(e)
@@ -497,7 +518,7 @@ func (c Command) follow(base, path, tok string) int {
 		return c.apiFail(res.StatusCode, b)
 	}
 	_, e = io.Copy(c.stdout, res.Body)
-	if e != nil {
+	if e != nil && ctx.Err() == nil {
 		return c.fail(e)
 	}
 	return 0
@@ -555,14 +576,33 @@ func expandEquals(in []string) []string {
 }
 
 func (c Command) help() {
-	fmt.Fprint(c.stdout, `Mirage manages temporary local application environments.
+	root := c.cobraTree()
+	root.SetOut(c.stdout)
+	_ = root.Help()
+}
 
-Usage: mirage [--server URL] [--token TOKEN] [--json] <command>
-Commands:
-  start [--public PORT] [--private PORT]
-  space create|list|delete
-  link create|list|logs|restart|delete
-`)
+// cobraTree is the canonical command/flag contract used for generated help and
+// shell completion. Execution delegates to the HTTP handlers above so they stay
+// independently testable.
+func (c Command) cobraTree() *cobra.Command {
+	root := &cobra.Command{Use: "mirage", Short: "Mirage manages temporary local application environments", Run: func(*cobra.Command, []string) {}}
+	root.PersistentFlags().String("server", "", "private Mirage server URL")
+	root.PersistentFlags().String("token", "", "space bearer token")
+	root.PersistentFlags().Bool("json", false, "emit JSON")
+	start := &cobra.Command{Use: "start", Short: "Start Mirage", Run: func(*cobra.Command, []string) {}}
+	start.Flags().String("public", "9955", "public port/address")
+	start.Flags().String("private", "9956", "private port/address")
+	start.Flags().String("config", "", "configuration file")
+	space := &cobra.Command{Use: "space", Short: "Manage spaces"}
+	for _, x := range []string{"create", "list", "delete"} {
+		space.AddCommand(&cobra.Command{Use: x, Short: x + " a space", Run: func(*cobra.Command, []string) {}})
+	}
+	link := &cobra.Command{Use: "link", Short: "Manage links"}
+	for _, x := range []string{"create", "list", "logs", "restart", "delete"} {
+		link.AddCommand(&cobra.Command{Use: x, Short: x + " a link", Run: func(*cobra.Command, []string) {}})
+	}
+	root.AddCommand(start, space, link)
+	return root
 }
 
 type config struct {

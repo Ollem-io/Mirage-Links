@@ -34,3 +34,24 @@ func TestStartHTTPIsolates(t *testing.T) {
 	_ = httptest.NewRecorder()
 	_ = http.MethodGet
 }
+
+func TestStartPrivateHTTP(t *testing.T) {
+	a := httpapi.New(nil, httpapi.Config{})
+	srv, e := StartPrivateHTTP("127.0.0.1:0", a)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if srv.Public != nil {
+		t.Fatal("public listener must be caddy-owned")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if e = srv.Shutdown(ctx); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestPortNumber(t *testing.T) {
+	if portNumber("127.0.0.1:1234") != 1234 || portNumber("bad") != 9955 {
+		t.Fatal()
+	}
+}

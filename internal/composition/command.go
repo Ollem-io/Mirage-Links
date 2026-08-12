@@ -7,11 +7,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/primeintellect/mirage/internal/adapters/inbound/cli"
+	"github.com/primeintellect/mirage/internal/adapters/inbound/httpapi"
 	"github.com/primeintellect/mirage/internal/adapters/outbound/caddy"
 	"github.com/primeintellect/mirage/internal/adapters/outbound/health"
 	"github.com/primeintellect/mirage/internal/adapters/outbound/libsql"
@@ -83,19 +85,88 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 	}
 	logStore := logs.NewStore()
 	sup := process.NewSupervisor(logStore)
-	var proxy ports.Proxy = noProxy{}
-	if o.CaddyAdmin != "" {
-		p, e := caddy.New(caddy.Config{AdminURL: o.CaddyAdmin})
+	managed := o.CaddyManaged
+	if o.CaddyAdmin == "" && !managed {
+		// The zero-value CLI options select the approved managed default.
+		managed = true
+	}
+	adminURL := o.CaddyAdmin
+	if adminURL == "" {
+		adminURL = "http://127.0.0.1:2019"
+	}
+	p, e := caddy.New(caddy.Config{AdminURL: adminURL})
+	if e != nil {
+		store.Close()
+		return nil, e
+	}
+	var proxy ports.Proxy = p
+	var child *caddy.Child
+	if managed {
+		binary := o.CaddyBinary
+		if binary == "" {
+			binary = "caddy"
+		}
+		configPath := filepath.Join(filepath.Dir(o.DataPath), "mirage-caddy.json")
+		cfg := fmt.Sprintf(`{"admin":{"listen":"127.0.0.1:2019"},"apps":{"http":{"servers":{"srv0":{"listen":[%q],"routes":[]}}}}}`, o.PublicAddress)
+		if e = os.WriteFile(configPath, []byte(cfg), 0600); e != nil {
+			store.Close()
+			return nil, e
+		}
+		child, e = caddy.Start(ctx, caddy.ChildConfig{Managed: true, Binary: binary, Args: []string{"run", "--config", configPath}, ReadyTimeout: 5 * time.Second, Probe: func(probe context.Context) error { _, x := proxy.List(probe); return x }})
 		if e != nil {
 			store.Close()
 			return nil, e
 		}
-		proxy = p
 	}
 	svc := &application.Service{Repo: store, Clock: clock{}, IDs: ids{}, Aliases: aliases{}, Tokens: tokens{}, Hashes: hashes{}, Ports: process.NewAllocator(), Processes: sup, Health: health.New(2 * time.Second), Proxy: proxy, Logs: logStore, Audit: store, BaseHost: base, PublicPort: portNumber(o.PublicAddress)}
-	api := NewHTTPAPI(svc)
-	servers, e := StartHTTP(ListenerConfig{PublicAddress: o.PublicAddress, PrivateAddress: o.PrivateAddress}, api, http.NotFoundHandler())
+	// Initial cleanup/reconciliation completes before the management listener is bound.
+	if e = svc.Cleanup(ctx); e != nil {
+		if child != nil {
+			_ = child.Stop()
+		}
+		store.Close()
+		return nil, e
+	}
+	links, e := store.ReconciliationLinks(ctx, time.Now().UTC())
 	if e != nil {
+		if child != nil {
+			_ = child.Stop()
+		}
+		store.Close()
+		return nil, e
+	}
+	routes := make([]ports.Route, 0, len(links))
+	for _, link := range links {
+		if link.Status != domain.StatusActive || link.AllocatedPort == 0 {
+			continue
+		}
+		sp, findErr := store.FindSpace(ctx, link.SpaceID)
+		if findErr != nil {
+			continue
+		}
+		route, routeErr := caddy.RouteFor(link.ID, base, link.Name, sp.Alias, link.AllocatedPort)
+		if routeErr == nil {
+			routes = append(routes, route)
+		}
+	}
+	if e = proxy.Reconcile(ctx, routes); e != nil {
+		if child != nil {
+			_ = child.Stop()
+		}
+		store.Close()
+		return nil, e
+	}
+	api := NewHTTPAPI(svc)
+	var servers *httpapi.Servers
+	if managed {
+		servers, e = StartPrivateHTTP(o.PrivateAddress, api)
+	} else {
+		servers, e = StartHTTP(ListenerConfig{PublicAddress: o.PublicAddress, PrivateAddress: o.PrivateAddress}, api, http.NotFoundHandler())
+	}
+	if e != nil {
+		if child != nil {
+			_ = child.Stop()
+		}
 		store.Close()
 		return nil, e
 	}
@@ -106,6 +177,11 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			out = ShutdownHTTP(shutdown, servers)
+			if child != nil {
+				if e := child.Stop(); out == nil {
+					out = e
+				}
+			}
 			if e := store.Close(); out == nil {
 				out = e
 			}
