@@ -155,6 +155,18 @@ func (a *API) dashboardSession(w http.ResponseWriter, r *http.Request) {
 		dashboardForbidden(w)
 		return
 	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, e := url.Parse(origin)
+		if e != nil || u.Host != r.Host {
+			dashboardLogin(w, true)
+			return
+		}
+	}
+	media, _, e := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if e != nil || media != "application/x-www-form-urlencoded" {
+		dashboardLogin(w, true)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, int64(a.maxBody))
 	if err := r.ParseForm(); err != nil {
 		dashboardLogin(w, true)
@@ -385,6 +397,13 @@ func (a *API) dashboardDeleteSpace(w http.ResponseWriter, r *http.Request, s dom
 var _ = url.PathEscape
 
 func (a *API) dashboardAdminRoute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		a.mutation(w, r, func() { a.dashboardAdminRouteInner(w, r) })
+		return
+	}
+	a.dashboardAdminRouteInner(w, r)
+}
+func (a *API) dashboardAdminRouteInner(w http.ResponseWriter, r *http.Request) {
 	ad, t, ok := a.dashboardAdmin(r)
 	if !ok || !dashboardCSRF(r) {
 		dashboardForbidden(w)
@@ -427,6 +446,20 @@ func (a *API) dashboardAdminRoute(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(path, pre) {
 		bits := strings.Split(strings.TrimPrefix(path, pre), "/")
 		alias := bits[0]
+		if len(bits) == 2 && bits[1] == "delete" && r.Method == http.MethodPost {
+			_ = r.ParseForm()
+			reason := strings.TrimSpace(r.FormValue("reason"))
+			if reason == "" {
+				http.Error(w, "Reason required", 400)
+				return
+			}
+			if e := ad.AdminDeleteSpace(r.Context(), t, application.DeleteSpaceInput{Alias: alias, Force: true, Reason: reason}); e != nil {
+				http.Error(w, "Delete failed", 400)
+				return
+			}
+			http.Redirect(w, r, "/dashboard/admin", 303)
+			return
+		}
 		if len(bits) >= 3 && bits[1] == "links" {
 			name := bits[2]
 			if len(bits) == 4 && bits[3] == "logs" && r.Method == http.MethodGet {
@@ -470,7 +503,7 @@ func (a *API) dashboardAdminRoute(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(w, "<!doctype html><html><body><h1>Admin space %s</h1><p>Expires %s</p><a href='/dashboard/admin'>All spaces</a><div id=links>", template.HTMLEscapeString(sp.Alias.String()), template.HTMLEscapeString(sp.ExpiresAt.Format(time.RFC3339)))
+			fmt.Fprintf(w, "<!doctype html><html><body><h1>Admin space %s</h1><p>Expires %s</p><a href='/dashboard/admin'>All spaces</a><form hx-post='/dashboard/admin/spaces/%s/delete'><input name=reason required placeholder='Force-delete reason'><button>Force delete space</button></form><div id=links>", template.HTMLEscapeString(sp.Alias.String()), template.HTMLEscapeString(sp.ExpiresAt.Format(time.RFC3339)), url.PathEscape(alias))
 			for _, l := range links {
 				n := template.HTMLEscapeString(l.Name.String())
 				u := "/dashboard/admin/spaces/" + url.PathEscape(alias) + "/links/" + url.PathEscape(l.Name.String())

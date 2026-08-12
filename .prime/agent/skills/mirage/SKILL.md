@@ -192,3 +192,8 @@ dashboard_ssl: true # only when a trusted TLS terminator fronts the private dash
 
 `external_scheme` is `http` or `https` (case-insensitive); with it set, zero/unset `external_port` selects 80 or 443. Without it Mirage retains legacy URL inference from `public_address`. The dashboard login posts its token in the form body, never the query string. A Zero Trust gateway (such as Pangolin) can still issue its own 401 before Mirage sees the request; that is distinct from Mirage's login landing page.
 
+
+
+## Installation-wide admin tokens
+
+Initialize on the Mirage host with explicit secure paths: `mirage admin init --token-file PATH --hash-file PATH`. Put only `admin.token_hash_file` in config. The service account must be able to read the hash file, while the raw token file remains owned/mode 0600 by the operator. Do not log, paste into JSON, or commit raw admin tokens. Admin is fail-closed unless a valid hash file is configured.

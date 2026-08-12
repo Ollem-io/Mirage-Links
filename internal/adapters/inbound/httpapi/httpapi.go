@@ -275,8 +275,12 @@ func adminBearer(r *http.Request) (domain.AdminToken, error) {
 }
 func (a *API) admin(r *http.Request) (adminService, domain.AdminToken, error) {
 	x, ok := a.service.(adminService)
-	if !ok || !x.AdminConfigured() {
+	// Older test/in-process Service implementations have no installation auth component.
+	if !ok {
 		return nil, "", nil
+	}
+	if !x.AdminConfigured() {
+		return nil, "", domain.NewUnauthorized("installation administration is not configured")
 	}
 	t, e := adminBearer(r)
 	if e != nil {
@@ -576,6 +580,13 @@ func (a *API) follow(w http.ResponseWriter, r *http.Request, sp domain.Space, t 
 }
 
 func (a *API) adminLinks(w http.ResponseWriter, r *http.Request, seg []string) {
+	if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+		a.mutation(w, r, func() { a.adminLinksInner(w, r, seg) })
+		return
+	}
+	a.adminLinksInner(w, r, seg)
+}
+func (a *API) adminLinksInner(w http.ResponseWriter, r *http.Request, seg []string) {
 	ad, t, e := a.admin(r)
 	if e != nil || ad == nil {
 		if e == nil {
