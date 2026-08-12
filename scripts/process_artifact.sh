@@ -16,7 +16,14 @@ child=$(awk '/child/{print $2; exit}' "$tmp/fork.out" 2>/dev/null || true); [ -n
 kill -KILL -- -"$leader" 2>/dev/null || true; wait "$leader" 2>/dev/null || true; sleep .02
 ! kill -0 "$child" 2>/dev/null || [ "$(awk '{print $3}' /proc/$child/stat 2>/dev/null || echo X)" = Z ]; pids=""
 setsid env PORT=$(free_port) "$tmp/service" ignore >/dev/null 2>&1 & pid=$!; pids=$pid
-for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null && break; sleep .01; done
+# Wait until setsid has created the child's own process group before sending a
+# group signal; otherwise a fast kill can target the artifact runner's group.
+ready=false
+for _ in $(seq 1 200); do
+  if kill -0 "$pid" 2>/dev/null && [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ]; then ready=true; break; fi
+  sleep .01
+done
+[ "$ready" = true ]
 kill -TERM -- -"$pid" 2>/dev/null || true; sleep .03; kill -0 "$pid" 2>/dev/null
 kill -KILL -- -"$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; pids=""
 PORT=$(free_port) LINES=200 "$tmp/service" noisy >"$tmp/noisy.out" 2>"$tmp/noisy.err"; grep -q stdout "$tmp/noisy.out"; grep -q stderr "$tmp/noisy.err"
