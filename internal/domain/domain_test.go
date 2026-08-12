@@ -219,3 +219,9 @@ func TestFailureCanRestartButHealthyMustGateActive(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestInternalErrorKind(t *testing.T) {
+	if e := NewInternal("x"); !IsKind(e, Internal) || e.Error() != "x" {
+		t.Fatal(e)
+	}
+}

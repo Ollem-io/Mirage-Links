@@ -57,6 +57,7 @@ type Link struct {
 	ExpiresAt       time.Time     `json:"expires_at"`
 	AllocatedPort   int           `json:"allocated_port,omitempty"`
 	ProcessIdentity string        `json:"process_identity,omitempty"`
+	AutoRestart     bool          `json:"auto_restart"`
 	RestartCount    int           `json:"restart_count"`
 	NextRestartAt   time.Time     `json:"next_restart_at,omitempty"`
 }

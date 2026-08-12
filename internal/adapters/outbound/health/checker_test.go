@@ -58,7 +58,7 @@ func TestCheckUntil(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
 	defer srv.Close()
 	start := time.Now()
-	if New(time.Second).CheckUntil(context.Background(), hc(t, "GET", srv.URL), 30*time.Millisecond, 5*time.Millisecond) == nil {
+	if New(time.Second).CheckUntil(context.Background(), hc(t, "GET", srv.URL), 30*time.Millisecond) == nil {
 		t.Fatal("expected grace")
 	}
 	if time.Since(start) < 20*time.Millisecond {
@@ -66,7 +66,7 @@ func TestCheckUntil(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if New(time.Second).CheckUntil(ctx, hc(t, "GET", srv.URL), time.Second, time.Millisecond) == nil {
+	if New(time.Second).CheckUntil(ctx, hc(t, "GET", srv.URL), time.Second) == nil {
 		t.Fatal("cancel accepted")
 	}
 }
@@ -81,6 +81,9 @@ func TestInjectedClientCannotPermitPublicRedirect(t *testing.T) {
 }
 
 func TestConstructorAndMalformedAndSuccessUntil(t *testing.T) {
+	if probeTimeout(time.Second) != time.Second {
+		t.Fatal("explicit timeout")
+	}
 	if New(0).Client.Timeout != 2*time.Second {
 		t.Fatal("default timeout")
 	}
@@ -93,7 +96,7 @@ func TestConstructorAndMalformedAndSuccessUntil(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer srv.Close()
-	if e := New(time.Second).CheckUntil(context.Background(), hc(t, "GET", srv.URL), time.Second, time.Millisecond); e != nil {
+	if e := New(time.Second).CheckUntil(context.Background(), hc(t, "GET", srv.URL), time.Second); e != nil {
 		t.Fatal(e)
 	}
 }
@@ -152,7 +155,7 @@ func TestInjectedTransportFailureAndGraceDefaultInterval(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if c.CheckUntil(ctx, hc(t, "GET", "http://127.0.0.1:1/"), time.Second, 0) == nil {
+	if c.CheckUntil(ctx, hc(t, "GET", "http://127.0.0.1:1/"), time.Second) == nil {
 		t.Fatal("cancel")
 	}
 }
@@ -160,3 +163,16 @@ func TestInjectedTransportFailureAndGraceDefaultInterval(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestNewDefaultAndInjectedNilClient(t *testing.T) {
+	if probeTimeout(time.Second) != time.Second {
+		t.Fatal("explicit timeout")
+	}
+	if New(0).Client.Timeout != 2*time.Second {
+		t.Fatal("default timeout")
+	}
+	c := &Checker{}
+	if c.Check(context.Background(), hc(t, "GET", "http://127.0.0.1:1/")) == nil {
+		t.Fatal("expected connection failure")
+	}
+}

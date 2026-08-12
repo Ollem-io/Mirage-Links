@@ -495,7 +495,7 @@ func TestUpgradeOriginalV1Fixture(t *testing.T) {
 		t.Fatalf("upgraded legacy row: %#v %v", got, err)
 	}
 	var version int
-	if err = s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 2 {
+	if err = s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != currentSchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	if _, err = s.db.Exec(`DELETE FROM spaces WHERE id='s'`); err != nil {
@@ -504,5 +504,39 @@ func TestUpgradeOriginalV1Fixture(t *testing.T) {
 	var links int
 	if err = s.db.QueryRow(`SELECT count(*) FROM links WHERE id='l'`).Scan(&links); err != nil || links != 0 {
 		t.Fatalf("upgraded foreign key did not cascade: %d %v", links, err)
+	}
+}
+
+func TestDeletedLinkTombstoneQuerySurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tombstone.db")
+	s, e := Open(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx := context.Background()
+	sp := space("s-tomb", "tomb", time.Now().Add(time.Hour))
+	if e = s.CreateSpace(ctx, sp); e != nil {
+		t.Fatal(e)
+	}
+	l := link("l-tomb", string(sp.ID), "api", time.Now().Add(time.Hour))
+	if e = s.CreateLink(ctx, l); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.DeleteLink(ctx, l.ID); e != nil {
+		t.Fatal(e)
+	}
+	s.Close()
+	s, e = Open(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	deleted, e := s.LinkDeleted(ctx, sp.ID, l.Name)
+	if e != nil || !deleted {
+		t.Fatal(e, deleted)
+	}
+	deleted, e = s.LinkDeleted(ctx, sp.ID, "unknown")
+	if e != nil || deleted {
+		t.Fatal(e, deleted)
 	}
 }

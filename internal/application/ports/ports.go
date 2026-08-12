@@ -21,6 +21,7 @@ type SpaceRepository interface {
 type LinkRepository interface {
 	CreateLink(context.Context, domain.Link) error
 	FindLink(context.Context, domain.SpaceID, domain.LinkName) (domain.Link, error)
+	LinkDeleted(context.Context, domain.SpaceID, domain.LinkName) (bool, error)
 	ListLinks(context.Context, domain.SpaceID) ([]domain.Link, error)
 	SaveLink(context.Context, domain.Link) error
 	ExpiredLinks(context.Context, time.Time) ([]domain.Link, error)
@@ -69,7 +70,7 @@ type StartRequest struct {
 }
 type ProcessIdentity struct{ Value string }
 type HealthChecker interface {
-	Check(context.Context, domain.HealthCheck) error
+	CheckUntil(context.Context, domain.HealthCheck, time.Duration) error
 }
 type Proxy interface {
 	Add(context.Context, Route) error

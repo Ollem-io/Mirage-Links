@@ -32,6 +32,9 @@ func (queryContractFake) CreateLink(context.Context, domain.Link) error     { re
 func (queryContractFake) FindLink(context.Context, domain.SpaceID, domain.LinkName) (domain.Link, error) {
 	return domain.Link{}, nil
 }
+func (queryContractFake) LinkDeleted(context.Context, domain.SpaceID, domain.LinkName) (bool, error) {
+	return false, nil
+}
 func (queryContractFake) ListLinks(context.Context, domain.SpaceID) ([]domain.Link, error) {
 	return nil, nil
 }
