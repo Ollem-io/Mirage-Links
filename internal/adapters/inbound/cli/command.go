@@ -61,6 +61,16 @@ func (c Command) Execute(args []string) int {
 	root.PersistentFlags().String("config", "", "configuration file")
 	_ = root
 	args = expandEquals(args)
+	if containsHelp(args) {
+		root := c.cobraTree()
+		root.SetOut(c.stdout)
+		root.SetErr(c.stderr)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			return c.usageError(err.Error())
+		}
+		return 0
+	}
 	if len(args) == 0 {
 		c.help()
 		return 0
@@ -480,12 +490,39 @@ func (c Command) request(base, method, path, tok string, payload any, jout bool,
 		return 0
 	}
 	if jout {
+		var decoded any
+		if json.Unmarshal(raw, &decoded) == nil {
+			key := responseListKey(path)
+			switch x := decoded.(type) {
+			case []any:
+				raw, _ = json.Marshal(map[string]any{key: x})
+			case map[string]any:
+				if items, ok := x["items"]; ok {
+					delete(x, "items")
+					x[key] = items
+					raw, _ = json.Marshal(x)
+				}
+			}
+		}
 		c.stdout.Write(append(bytes.TrimSpace(raw), '\n'))
 		return 0
 	}
-	var v map[string]any
-	if e = json.Unmarshal(raw, &v); e != nil {
+	var decoded any
+	if e = json.Unmarshal(raw, &decoded); e != nil {
 		return c.fail(e)
+	}
+	v, ok := decoded.(map[string]any)
+	if !ok {
+		if items, arrayOK := decoded.([]any); arrayOK {
+			v = map[string]any{responseListKey(path): items}
+		} else {
+			return c.fail(fmt.Errorf("unexpected API response shape"))
+		}
+	}
+	if items, exists := v["items"]; exists {
+		if _, already := v[responseListKey(path)]; !already {
+			v[responseListKey(path)] = items
+		}
 	}
 	human(v)
 	return 0
@@ -523,6 +560,16 @@ func (c Command) follow(base, path, tok string) int {
 	}
 	return 0
 }
+func responseListKey(path string) string {
+	if strings.Contains(path, "/logs") {
+		return "logs"
+	}
+	if strings.Contains(path, "/links") {
+		return "links"
+	}
+	return "spaces"
+}
+
 func (c Command) apiFail(status int, b []byte) int {
 	var x struct{ Code, Message string }
 	if json.Unmarshal(b, &x) == nil && x.Code != "" {
@@ -562,6 +609,15 @@ func (c Command) printRows(v map[string]any, key string, fields []string) {
 	}
 }
 
+func containsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--help" || a == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
 // expandEquals accepts the standard pflag/Cobra --flag=value spelling.
 func expandEquals(in []string) []string {
 	out := make([]string, 0, len(in))
@@ -594,13 +650,26 @@ func (c Command) cobraTree() *cobra.Command {
 	start.Flags().String("private", "9956", "private port/address")
 	start.Flags().String("config", "", "configuration file")
 	space := &cobra.Command{Use: "space", Short: "Manage spaces"}
-	for _, x := range []string{"create", "list", "delete"} {
-		space.AddCommand(&cobra.Command{Use: x, Short: x + " a space", Run: func(*cobra.Command, []string) {}})
-	}
+	spaceCreate := &cobra.Command{Use: "create", Short: "create a space", Run: func(*cobra.Command, []string) {}}
+	spaceCreate.Flags().String("ttl", "", "space TTL")
+	spaceCreate.Flags().String("alias", "", "space alias")
+	spaceList := &cobra.Command{Use: "list [alias]", Short: "list spaces", Args: cobra.MaximumNArgs(1), Run: func(*cobra.Command, []string) {}}
+	spaceDelete := &cobra.Command{Use: "delete <alias>", Short: "delete a space", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) {}}
+	spaceDelete.Flags().String("force", "", "administrative audit reason")
+	space.AddCommand(spaceCreate, spaceList, spaceDelete)
 	link := &cobra.Command{Use: "link", Short: "Manage links"}
-	for _, x := range []string{"create", "list", "logs", "restart", "delete"} {
-		link.AddCommand(&cobra.Command{Use: x, Short: x + " a link", Run: func(*cobra.Command, []string) {}})
+	linkCreate := &cobra.Command{Use: "create", Short: "create a link", Run: func(*cobra.Command, []string) {}}
+	for _, f := range []string{"name", "command", "execution-folder", "health-check", "grace", "ttl"} {
+		linkCreate.Flags().String(f, "", f)
 	}
+	linkCreate.Flags().Bool("restarts", false, "automatic restarts")
+	linkList := &cobra.Command{Use: "list", Short: "list links", Run: func(*cobra.Command, []string) {}}
+	linkLogs := &cobra.Command{Use: "logs <name>", Short: "show link logs", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) {}}
+	linkLogs.Flags().Int("tail", 100, "lines to show")
+	linkLogs.Flags().Bool("follow", false, "follow logs")
+	linkRestart := &cobra.Command{Use: "restart <name>", Short: "restart a link", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) {}}
+	linkDelete := &cobra.Command{Use: "delete <name>", Short: "delete a link", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) {}}
+	link.AddCommand(linkCreate, linkList, linkLogs, linkRestart, linkDelete)
 	root.AddCommand(start, space, link)
 	return root
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -115,7 +116,7 @@ func TestFailureMatrix(t *testing.T) {
 	}
 }
 func TestTransportAndMalformed(t *testing.T) {
-	for _, body := range []string{"not-json", "[]"} {
+	for _, body := range []string{"not-json", "true"} {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 		var o, e bytes.Buffer
 		c := New(&o, &e, func() string { return "v" })
@@ -320,5 +321,48 @@ func TestDirectRequestConstructionFailures(t *testing.T) {
 	c.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, context.Canceled })}
 	if c.follow("http://x", "/", "t") == 0 {
 		t.Fatal()
+	}
+}
+
+func TestNestedCobraHelp(t *testing.T) {
+	for _, a := range [][]string{{"space", "--help"}, {"space", "create", "--help"}, {"link", "--help"}, {"link", "logs", "--help"}} {
+		var o, e bytes.Buffer
+		c := New(&o, &e, func() string { return "v" })
+		if x := c.Execute(a); x != 0 {
+			t.Fatalf("%v exit %d %s", a, x, e.String())
+		}
+		if !strings.Contains(o.String(), "Usage:") {
+			t.Fatalf("%v %s", a, o.String())
+		}
+	}
+}
+func TestAlternateListShapes(t *testing.T) {
+	for _, body := range []string{`{"items":[{"name":"api","status":"active"}]}`, `[{"name":"api","status":"active"}]`} {
+		for _, jsonMode := range []bool{false, true} {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, body)
+			}))
+			var o, e bytes.Buffer
+			c := New(&o, &e, func() string { return "v" })
+			a := []string{"--server", s.URL, "--token", "t"}
+			if jsonMode {
+				a = append(a, "--json")
+			}
+			a = append(a, "link", "list")
+			if x := c.Execute(a); x != 0 {
+				t.Fatalf("%s json=%v: %d %s", body, jsonMode, x, e.String())
+			}
+			if !strings.Contains(o.String(), "api") {
+				t.Fatalf("%s", o.String())
+			}
+			if jsonMode {
+				var v map[string]any
+				if json.Unmarshal(o.Bytes(), &v) != nil || v["links"] == nil {
+					t.Fatalf("not normalized: %s", o.String())
+				}
+			}
+			s.Close()
+		}
 	}
 }
