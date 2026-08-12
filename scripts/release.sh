@@ -2,7 +2,7 @@
 # Hermetic release candidate: build a versioned executable, checksum it, then
 # run it from a directory containing no source tree.
 set -eu
-version=${VERSION:-dev}
+version=${VERSION:-v1.0.0}
 out=${1:-dist}
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 rm -rf "$out"

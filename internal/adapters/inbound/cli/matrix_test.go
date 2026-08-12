@@ -258,8 +258,8 @@ func TestConfigResolutionDefaults(t *testing.T) {
 		t.Fatal(c, e)
 	}
 	t.Setenv("MIRAGE_CONFIG", filepath.Join(d, "missing"))
-	if _, e = loadConfig("", os.Getenv, os.Getwd); e != nil {
-		t.Fatal(e)
+	if _, e = loadConfig("", os.Getenv, os.Getwd); e == nil {
+		t.Fatal("explicit MIRAGE_CONFIG missing must fail")
 	}
 	if _, e = loadConfig(d, os.Getenv, os.Getwd); e == nil {
 		t.Fatal()
@@ -363,6 +363,41 @@ func TestAlternateListShapes(t *testing.T) {
 				}
 			}
 			s.Close()
+		}
+	}
+}
+
+func TestStartRejectsResolvedInvalidBindsBeforeSpawn(t *testing.T) {
+	invalid := [][]string{{"start", "--public", "0"}, {"start", "--public", "-1"}, {"start", "--private", "nope"}, {"start", "--private", "99999"}}
+	for _, args := range invalid {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var out, err bytes.Buffer
+			spawns := 0
+			c := NewWithStart(&out, &err, func() string { return "v" }, func(context.Context, StartOptions) (func() error, error) {
+				spawns++
+				return func() error { return nil }, nil
+			})
+			c.waitSignal = func() {}
+			if got := c.Execute(args); got == 0 || spawns != 0 {
+				t.Fatalf("exit=%d spawns=%d stderr=%s", got, spawns, err.String())
+			}
+		})
+	}
+}
+func TestStartExplicitConfigFailureBeforeSpawn(t *testing.T) {
+	for _, args := range [][]string{{"--config", filepath.Join(t.TempDir(), "missing"), "start"}, {"start"}} {
+		var out, err bytes.Buffer
+		spawns := 0
+		c := NewWithStart(&out, &err, func() string { return "v" }, func(context.Context, StartOptions) (func() error, error) {
+			spawns++
+			return func() error { return nil }, nil
+		})
+		c.waitSignal = func() {}
+		if len(args) == 1 {
+			t.Setenv("MIRAGE_CONFIG", filepath.Join(t.TempDir(), "missing"))
+		}
+		if got := c.Execute(args); got == 0 || spawns != 0 {
+			t.Fatalf("%v exit=%d spawns=%d err=%s", args, got, spawns, err.String())
 		}
 	}
 }
