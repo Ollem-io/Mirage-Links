@@ -81,3 +81,7 @@ run = "./scripts/process_artifact.sh"
 [tasks.coverage-mir05]
 description = "Enforce MIR-05 package coverage"
 run = "./scripts/coverage_mir05.sh"
+
+[tasks.mir06-scenario]
+description = "Run deterministic MIR-06 application lifecycle trace artifact"
+run = "./scripts/mir06-scenario.sh"
