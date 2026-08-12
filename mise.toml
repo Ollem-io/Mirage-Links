@@ -69,3 +69,7 @@ run = "go test ./internal/domain"
 [tasks.test-libsql]
 description = "Run MIR-03 real embedded libSQL migration/CRUD/reopen artifact"
 run = "./scripts/libsql-integration.sh"
+
+[tasks.caddy-integration]
+description = "Run hermetic real-Caddy MIR-04 adapter harness"
+run = "mise exec caddy@2.10.2 -- go test ./internal/adapters/outbound/caddy -run TestRealCaddyAdminHarness -count=1"
