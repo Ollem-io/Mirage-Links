@@ -60,7 +60,7 @@ run = "./scripts/smoke.sh"
 
 [tasks.check]
 description = "Run formatting, tests, coverage, build, and black-box smoke checks"
-depends = ["fmt-check", "lint", "test", "coverage", "build", "smoke"]
+depends = ["fmt-check", "lint", "test", "coverage", "coverage-mir05", "build", "smoke"]
 
 [tasks.test-domain]
 description = "Run domain contract tests"
@@ -73,3 +73,11 @@ run = "./scripts/libsql-integration.sh"
 [tasks.caddy-integration]
 description = "Run hermetic real-Caddy MIR-04 adapter harness"
 run = "mise exec caddy@2.10.2 -- go test ./internal/adapters/outbound/caddy -run TestRealCaddyAdminHarness -count=1"
+
+[tasks.process-artifact]
+description = "Run MIR-05 real OS process, health, and bounded-log adapter artifact"
+run = "./scripts/process_artifact.sh"
+
+[tasks.coverage-mir05]
+description = "Enforce MIR-05 package coverage"
+run = "./scripts/coverage_mir05.sh"
