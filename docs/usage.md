@@ -1,6 +1,8 @@
-# Mirage Usage (proposed v1 contract)
+# Mirage Usage (approved v1 contract)
 
-This document is the user-facing behavior proposed for review. Commands use the `mirage` binary.
+This document is the user-approved v1 behavior. Commands use the `mirage` binary.
+
+> Approved by the product owner on 2026-08-12.
 
 ## 1. Install and configure
 
@@ -267,9 +269,9 @@ Example A: after a server crash, restarting `mirage start` reconciles database a
 
 Example B: if Caddy was manually edited and a Mirage route disappeared, the next reconciliation restores it only if its link process is alive and healthy.
 
-## Review decisions
+## Approved decisions
 
-Please confirm or change these proposed choices:
+The product owner approved these choices:
 
 1. Host grammar: `base_host: mirage.example.com` means `<link>-<space>.mirage.example.com`; a leading dash means `<link>-<space>-mirage.example.com`.
 2. Public URLs include the configured public port unless external forwarding supplies 80/443; Mirage itself does not manage TLS/DNS in v1.
