@@ -117,7 +117,7 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 			binary = "caddy"
 		}
 		configPath := filepath.Join(filepath.Dir(o.DataPath), "mirage-caddy.json")
-		cfg := fmt.Sprintf(`{"admin":{"listen":%q},"apps":{"http":{"servers":{"srv0":{"listen":[%q],"routes":[{"@id":"mirage-fallback","match":[{"host":["invalid."]}],"handle":[{"handler":"static_response","status_code":404}],"terminal":true}]}}}}}`, adminListen, o.PublicAddress)
+		cfg := fmt.Sprintf(`{"admin":{"listen":%q},"apps":{"http":{"servers":{"srv0":{"listen":[%q],"routes":[{"@id":"mirage-fallback","match":[{"path":["/*"]}],"handle":[{"handler":"static_response","status_code":404}],"terminal":true}]}}}}}`, adminListen, o.PublicAddress)
 		if e = os.WriteFile(configPath, []byte(cfg), 0600); e != nil {
 			store.Close()
 			return nil, e
