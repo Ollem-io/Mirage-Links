@@ -66,12 +66,10 @@ depends = ["fmt-check", "lint", "test", "coverage", "build", "smoke"]
 description = "Run domain contract tests"
 run = "go test ./internal/domain"
 
-<<<<<<< HEAD
 [tasks.test-libsql]
 description = "Run MIR-03 real embedded libSQL migration/CRUD/reopen artifact"
 run = "./scripts/libsql-integration.sh"
-=======
+
 [tasks.caddy-integration]
 description = "Run hermetic real-Caddy MIR-04 adapter harness"
 run = "mise exec caddy@2.10.2 -- go test ./internal/adapters/outbound/caddy -run TestRealCaddyAdminHarness -count=1"
->>>>>>> 75d460b (fix(caddy): make reconciliation transactional and add real harness)
