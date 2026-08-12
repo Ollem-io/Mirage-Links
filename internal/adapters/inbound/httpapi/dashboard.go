@@ -1,0 +1,228 @@
+package httpapi
+
+import (
+	"context"
+	_ "embed"
+	"html/template"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/primeintellect/mirage/internal/application"
+	"github.com/primeintellect/mirage/internal/application/ports"
+	"github.com/primeintellect/mirage/internal/domain"
+)
+
+//go:embed dashboard.html
+var dashboardTemplate string
+
+//go:embed dashboard.css
+var dashboardCSS []byte
+
+//go:embed dashboard.js
+var dashboardJS []byte
+
+var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncMap{
+	"until": func(t time.Time) string {
+		d := time.Until(t).Round(time.Second)
+		if d < 0 {
+			return "expired"
+		}
+		return d.String()
+	},
+	"stamp": func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+}).Parse(dashboardTemplate))
+
+type dashboardData struct {
+	Space domain.Space
+	Links []dashboardLink
+	Logs  map[string][]ports.LogEntry
+	Error string
+	Now   time.Time
+}
+type dashboardLink struct {
+	Name, URL string
+	Status    domain.LinkStatus
+	ExpiresAt time.Time
+	Restarts  bool
+}
+
+func (a *API) dashboardToken(r *http.Request) (domain.Token, bool) {
+	if t, e := bearer(r); e == nil {
+		return t, true
+	}
+	c, e := r.Cookie("mirage_dashboard_token")
+	if e != nil || strings.TrimSpace(c.Value) == "" {
+		return "", false
+	}
+	return domain.Token(c.Value), true
+}
+func (a *API) dashboardAuth(w http.ResponseWriter, r *http.Request) (domain.Space, domain.Token, bool) {
+	t, ok := a.dashboardToken(r)
+	if !ok {
+		return domain.Space{}, "", false
+	}
+	s, e := a.service.SpaceForToken(r.Context(), t)
+	if e != nil {
+		return domain.Space{}, "", false
+	}
+	// A bearer token is exchanged for an HttpOnly, same-site cookie. It is never
+	// interpolated into HTML, logs, an URL, or an error response.
+	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_token", Value: t.Reveal(), Path: "/dashboard", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	}
+	return s, t, true
+}
+func dashboardForbidden(w http.ResponseWriter) {
+	writeErr(w, http.StatusNotFound, "not_found", "route not found", nil)
+}
+func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/dashboard/assets/dashboard.css" {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = w.Write(dashboardCSS)
+		return
+	}
+	if r.URL.Path == "/dashboard/assets/dashboard.js" {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = w.Write(dashboardJS)
+		return
+	}
+	s, t, ok := a.dashboardAuth(w, r)
+	if !ok {
+		dashboardForbidden(w)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/dashboard")
+	if path == "" || path == "/" {
+		if r.Method != "GET" {
+			method(w)
+			return
+		}
+		a.renderDashboard(w, r, "page", s, t, "")
+		return
+	}
+	if path == "/spaces" && r.Method == "GET" {
+		a.renderDashboard(w, r, "spaces", s, t, "")
+		return
+	}
+	if path == "/links" && r.Method == "GET" {
+		a.renderDashboard(w, r, "links", s, t, "")
+		return
+	}
+	if strings.HasPrefix(path, "/links/") {
+		bits := strings.Split(strings.Trim(path, "/"), "/")
+		if len(bits) == 3 && bits[2] == "logs" && r.Method == "GET" {
+			a.renderDashboard(w, r, "logs", s, t, bits[1])
+			return
+		}
+		if len(bits) == 3 && bits[2] == "restart" && r.Method == "POST" {
+			a.dashboardRestart(w, r, s, t, bits[1])
+			return
+		}
+		if len(bits) == 2 && r.Method == "DELETE" {
+			a.dashboardDeleteLink(w, r, s, t, bits[1])
+			return
+		}
+	}
+	if strings.HasPrefix(path, "/spaces/") && r.Method == "DELETE" {
+		a.dashboardDeleteSpace(w, r, s, t, strings.TrimPrefix(path, "/spaces/"))
+		return
+	}
+	dashboardForbidden(w)
+}
+func (a *API) dashboardData(ctx context.Context, s domain.Space, t domain.Token, logName string) dashboardData {
+	d := dashboardData{Space: s, Logs: map[string][]ports.LogEntry{}, Now: time.Now().UTC()}
+	links, e := a.service.ListLinks(ctx, s.Alias.String(), t)
+	if e != nil {
+		d.Error = "Unable to load links."
+		return d
+	}
+	for _, l := range links {
+		d.Links = append(d.Links, dashboardLink{Name: l.Name.String(), URL: a.dashboardURL(l, s), Status: l.Status, ExpiresAt: l.ExpiresAt, Restarts: l.AutoRestart})
+	}
+	if logName != "" {
+		x, e := a.service.LogsFor(ctx, s.Alias.String(), t, logName, 100)
+		if e != nil {
+			d.Error = "Unable to load recent logs."
+		} else {
+			d.Logs[logName] = x
+		}
+	}
+	return d
+}
+func (a *API) dashboardURL(l domain.Link, s domain.Space) string {
+	if svc, ok := a.service.(*application.Service); ok {
+		if u, e := domain.PublicURL(svc.BaseHost, l.Name, s.Alias, svc.PublicPort); e == nil {
+			return u
+		}
+	}
+	return ""
+}
+func (a *API) renderDashboard(w http.ResponseWriter, r *http.Request, part string, s domain.Space, t domain.Token, logName string) {
+	d := a.dashboardData(r.Context(), s, t, logName)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if e := dashboardTmpl.ExecuteTemplate(w, part, d); e != nil { /* never disclose template/internal error */
+		http.Error(w, "", 500)
+	}
+}
+func dashboardReason(r *http.Request) string {
+	_ = r.ParseForm()
+	return strings.TrimSpace(r.Form.Get("reason"))
+}
+func dashboardError(w http.ResponseWriter, r *http.Request, s domain.Space, t domain.Token, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = dashboardTmpl.ExecuteTemplate(w, "error", dashboardData{Space: s, Error: msg})
+}
+func (a *API) dashboardRestart(w http.ResponseWriter, r *http.Request, s domain.Space, t domain.Token, name string) {
+	reason := dashboardReason(r)
+	if reason == "" {
+		dashboardError(w, r, s, t, "A reason is required to restart a link.")
+		return
+	}
+	a.mutation(w, r, func() {
+		_, e := a.service.RestartLink(r.Context(), application.LinkMutationInput{Alias: s.Alias.String(), Token: t, Name: name, Reason: reason})
+		if e != nil {
+			dashboardError(w, r, s, t, "Restart failed.")
+			return
+		}
+		a.renderDashboard(w, r, "links", s, t, "")
+	})
+}
+func (a *API) dashboardDeleteLink(w http.ResponseWriter, r *http.Request, s domain.Space, t domain.Token, name string) {
+	reason := dashboardReason(r)
+	if reason == "" {
+		dashboardError(w, r, s, t, "A reason is required to delete a link.")
+		return
+	}
+	a.mutation(w, r, func() {
+		e := a.service.DeleteLink(r.Context(), application.LinkMutationInput{Alias: s.Alias.String(), Token: t, Name: name, Reason: reason})
+		if e != nil {
+			dashboardError(w, r, s, t, "Delete failed.")
+			return
+		}
+		a.renderDashboard(w, r, "links", s, t, "")
+	})
+}
+func (a *API) dashboardDeleteSpace(w http.ResponseWriter, r *http.Request, s domain.Space, t domain.Token, alias string) {
+	reason := dashboardReason(r)
+	if reason == "" {
+		dashboardError(w, r, s, t, "A reason is required to force delete a space.")
+		return
+	}
+	a.mutation(w, r, func() {
+		e := a.service.DeleteSpace(r.Context(), application.DeleteSpaceInput{Alias: alias, Force: true, Reason: reason})
+		if e != nil {
+			dashboardError(w, r, s, t, "Force delete failed.")
+			return
+		}
+		w.Header().Set("HX-Redirect", "/")
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+// keep net/url in this file's dependency graph as a guard against ever treating
+// a dashboard path component as a URL without escaping it.
+var _ = url.PathEscape

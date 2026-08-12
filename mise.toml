@@ -29,8 +29,8 @@ description = "Run the Go test suite"
 run = "go test ./..."
 
 [tasks.assets]
-description = "Verify the pinned Tailwind asset tool is available"
-run = "tailwindcss --help >/dev/null"
+description = "Verify embedded dashboard asset inputs and pinned Tailwind v4 tool"
+run = "test -s internal/adapters/inbound/httpapi/dashboard.css && test -s internal/adapters/inbound/httpapi/dashboard.tailwind.css && grep -q 'Tailwind CSS v4.1.17' internal/adapters/inbound/httpapi/dashboard.css && tailwindcss --help >/dev/null"
 
 [tasks.e2e]
 description = "Run bootstrap black-box end-to-end smoke test"
