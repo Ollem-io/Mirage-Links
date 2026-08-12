@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
-# Seeded httptest HTTP/DOM artifact: no listener, DNS, browser, or secrets needed.
+# Headless black-box HTTP/DOM journey against production private/public servers
+# on random loopback listeners with seeded temporary in-memory data.
 set -eu
-mise exec go@1.26 -- go test -count=1 -run 'TestDashboard(PrivateFragmentsAndEscaping|MutationFragmentsAndCookies|CSRF)' ./internal/adapters/inbound/httpapi
+mise exec go@1.26 -- go test -count=1 -run '^TestDashboardRunningListenerArtifact$' ./internal/adapters/inbound/httpapi

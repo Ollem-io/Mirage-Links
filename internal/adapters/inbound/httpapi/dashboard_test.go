@@ -227,9 +227,43 @@ func TestDashboardMutationErrorFragments(t *testing.T) {
 		r := httptest.NewRequest("POST", "/dashboard", strings.NewReader("reason=audited"))
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		w := httptest.NewRecorder()
-		tc.call(a, w, r, f.space, "token", "api")
+		target := "api"
+		if tc.path == "force" {
+			target = f.space.Alias.String()
+		}
+		tc.call(a, w, r, f.space, "token", target)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), "failed") || strings.Contains(w.Body.String(), "do not show") {
 			t.Fatalf("%s: %d %s", tc.path, w.Code, w.Body.String())
 		}
+	}
+}
+
+func TestDashboardRejectsCrossSpaceMutationsWithoutSideEffects(t *testing.T) {
+	f := fixture() // token authenticates to space "calm"
+	a := New(f, Config{})
+	a.SetReady(true)
+	h := a.Handler()
+
+	r := httptest.NewRequest(http.MethodDelete, "/dashboard/spaces/other", strings.NewReader("reason=attack"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Authorization", "Bearer token-for-calm")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("cross-space delete status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(f.deleted) != 0 {
+		t.Fatalf("cross-space delete reached service/audit: %#v", f.deleted)
+	}
+
+	// The authenticated space remains a valid target and its reason is carried
+	// to the audited force-delete operation.
+	r = httptest.NewRequest(http.MethodDelete, "/dashboard/spaces/calm", strings.NewReader("reason=operator+cleanup"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Authorization", "Bearer token-for-calm")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent || len(f.deleted) != 1 || f.deleted[0].Alias != "calm" || f.deleted[0].Reason != "operator cleanup" {
+		t.Fatalf("own-space delete status=%d calls=%#v", w.Code, f.deleted)
 	}
 }

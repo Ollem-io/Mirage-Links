@@ -6,6 +6,8 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"html/template"
+	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -195,8 +197,25 @@ func (a *API) renderDashboard(w http.ResponseWriter, r *http.Request, part strin
 	}
 }
 func dashboardReason(r *http.Request) string {
-	_ = r.ParseForm()
-	return strings.TrimSpace(r.Form.Get("reason"))
+	// net/http ParseForm intentionally ignores URL-encoded DELETE bodies, while
+	// dashboard delete controls send their audited reason in the request body.
+	// Parse both encodings emitted by browser/headless form clients, bounded by
+	// the same request-size order as the API.
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if r.Method == http.MethodDelete && mediaType == "application/x-www-form-urlencoded" {
+		b, _ := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+		if len(b) <= maxBody {
+			values, _ := url.ParseQuery(string(b))
+			return strings.TrimSpace(values.Get("reason"))
+		}
+		return ""
+	}
+	if mediaType == "multipart/form-data" {
+		_ = r.ParseMultipartForm(maxBody)
+	} else {
+		_ = r.ParseForm()
+	}
+	return strings.TrimSpace(r.FormValue("reason"))
 }
 func dashboardError(w http.ResponseWriter, r *http.Request, s domain.Space, t domain.Token, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -233,6 +252,14 @@ func (a *API) dashboardDeleteLink(w http.ResponseWriter, r *http.Request, s doma
 	})
 }
 func (a *API) dashboardDeleteSpace(w http.ResponseWriter, r *http.Request, s domain.Space, t domain.Token, alias string) {
+	// The URL is attacker-controlled. Force deletion intentionally bypasses token
+	// validation in the application service, so bind the target to the space that
+	// dashboard authentication resolved before parsing a reason or admitting a
+	// mutation (and therefore before any delete/audit side effect).
+	if alias != s.Alias.String() {
+		dashboardForbidden(w)
+		return
+	}
 	reason := dashboardReason(r)
 	if reason == "" {
 		dashboardError(w, r, s, t, "A reason is required to force delete a space.")
