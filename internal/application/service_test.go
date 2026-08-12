@@ -376,3 +376,27 @@ func TestAdvertisedURLUsesExternalConfiguration(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestAdminAuthorizationAndGlobalMethods(t *testing.T) {
+	s, _, _ := setup(t)
+	a, _ := domain.NewAdminToken()
+	h := a.Hash()
+	s.AdminTokenHash = &h
+	ctx := context.Background()
+	if _, e := s.AdminListSpaces(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.AdminCreateSpace(ctx, a, CreateSpaceInput{Alias: "admin-new"}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.AdminGetSpace(ctx, a, "admin-new"); e != nil {
+		t.Fatal(e)
+	}
+	bad := domain.AdminToken("mir_admin_bad")
+	if _, e := s.AdminListSpaces(ctx, bad); e == nil {
+		t.Fatal("bad accepted")
+	}
+	if e := s.AdminDeleteSpace(ctx, a, DeleteSpaceInput{Alias: "admin-new", Reason: "cleanup"}); e != nil {
+		t.Fatal(e)
+	}
+}
