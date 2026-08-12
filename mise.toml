@@ -5,7 +5,6 @@ CGO_ENABLED = "1"
 go = "1.26"
 caddy = "2.10.2"
 node = "24.13.1"
-"npm:@tailwindcss/cli" = "4.1.17"
 
 [tasks.fmt]
 description = "Format Go source files"
@@ -33,10 +32,9 @@ description = "Rebuild reproducible embedded Tailwind v4 dashboard CSS and rejec
 run = '''set -eu
 D=internal/adapters/inbound/httpapi
 out=$(mktemp)
-mkdir -p "$D/node_modules"
-ln -sf "${MISE_DATA_DIR:-$HOME/.local/share/mise}/installs/npm-tailwindcss-cli/4.1.17/node_modules/.mise/tailwindcss@4.1.17/node_modules/tailwindcss" "$D/node_modules/tailwindcss"
-trap 'rm -rf "$D/node_modules" "$out"' EXIT
-tailwindcss -i "$D/dashboard.tailwind.css" -o "$out" --minify
+trap 'rm -f "$out"' EXIT
+npm ci --ignore-scripts --no-audit --no-fund
+./node_modules/.bin/tailwindcss -i "$D/dashboard.tailwind.css" -o "$out" --minify
 cmp "$out" "$D/dashboard.css"
 grep -q 'tailwindcss v4.1.17' "$D/dashboard.css"'''
 

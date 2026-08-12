@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
-	"fmt"
 	"html/template"
 	"io"
 	"mime"
@@ -29,6 +28,18 @@ var dashboardCSS []byte
 var dashboardJS []byte
 
 var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncMap{
+	"badge": func(s domain.LinkStatus) string {
+		switch s {
+		case domain.StatusActive, domain.StatusHealthy:
+			return "badge-success"
+		case domain.StatusCreating, domain.StatusStarting, domain.StatusStopping:
+			return "badge-warning"
+		case domain.StatusFailed, domain.StatusExpired, domain.StatusDeleted:
+			return "badge-error"
+		default:
+			return "badge-info"
+		}
+	},
 	"until": func(t time.Time) string {
 		d := time.Until(t).Round(time.Second)
 		if d < 0 {
@@ -40,11 +51,14 @@ var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncM
 }).Parse(dashboardTemplate))
 
 type dashboardData struct {
-	Space domain.Space
-	Links []dashboardLink
-	Logs  map[string][]ports.LogEntry
-	Error string
-	Now   time.Time
+	Title, Body, Home, Notice, Reveal string
+	Logout                            bool
+	Space                             domain.Space
+	Spaces                            []domain.Space
+	Links                             []dashboardLink
+	Logs                              map[string][]ports.LogEntry
+	Error                             string
+	Now                               time.Time
 }
 type dashboardLink struct {
 	Name, URL string
@@ -102,7 +116,7 @@ func dashboardForbidden(w http.ResponseWriter) {
 }
 func (a *API) setDashboardCookies(w http.ResponseWriter, r *http.Request, t domain.Token) {
 	secure := r.TLS != nil || a.dashboardSSL
-	http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_token", Value: t.Reveal(), Path: "/dashboard", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure})
+	http.SetCookie(w, &http.Cookie{Name: "mirage_dashboard_token", Value: t.Reveal(), Path: "/dashboard", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure, MaxAge: 3600})
 	csrf := make([]byte, 24)
 	if _, err := rand.Read(csrf); err != nil {
 		return
@@ -143,12 +157,13 @@ func dashboardLogout(w http.ResponseWriter, r *http.Request) {
 
 func dashboardLogin(w http.ResponseWriter, invalid bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	msg := ""
+	d := dashboardData{Title: "Mirage dashboard", Body: "login-body", Home: "/dashboard"}
 	if invalid {
-		msg = `<p role="alert">Unauthorized. Please try again.</p>`
+		d.Error = "Unauthorized. Please try again."
 	}
-	_, _ = io.WriteString(w, `<!doctype html><html><head><title>Mirage dashboard</title></head><body><h1>Mirage dashboard</h1>`+msg+`<form method="post" action="/dashboard/session"><label>Admin or space token <input type="password" name="token" autocomplete="current-password" required></label><button type="submit">Open dashboard</button></form></body></html>`)
+	if e := dashboardTmpl.ExecuteTemplate(w, "login", d); e != nil {
+		http.Error(w, "", http.StatusInternalServerError)
+	}
 }
 
 func (a *API) dashboardSession(w http.ResponseWriter, r *http.Request) {
@@ -309,6 +324,9 @@ func (a *API) dashboardURL(l domain.Link, s domain.Space) string {
 func (a *API) renderDashboard(w http.ResponseWriter, r *http.Request, part string, s domain.Space, t domain.Token, logName string) {
 	d := a.dashboardData(r.Context(), s, t, logName)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if part == "page" {
+		d.Title, d.Body, d.Home, d.Logout = "Mirage dashboard", "space-page", "/dashboard", true
+	}
 	if e := dashboardTmpl.ExecuteTemplate(w, part, d); e != nil { /* never disclose template/internal error */
 		http.Error(w, "", 500)
 	}
@@ -427,94 +445,104 @@ func (a *API) dashboardAdminRouteInner(w http.ResponseWriter, r *http.Request) {
 		}
 		ttl := time.Duration(0)
 		var e error
-		if x := r.FormValue("ttl"); x != "" {
-			ttl, e = time.ParseDuration(x)
+		if v := r.FormValue("ttl"); v != "" {
+			ttl, e = time.ParseDuration(v)
 			if e != nil {
-				http.Error(w, "Invalid TTL", 400)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusBadRequest)
+				a.dashboardAdminError(w, "Invalid TTL.")
 				return
 			}
 		}
 		x, e := ad.AdminCreateSpace(r.Context(), t, application.CreateSpaceInput{TTL: ttl, Alias: r.FormValue("alias")})
 		if e != nil {
-			http.Error(w, "Create failed", 400)
+			a.dashboardAdminError(w, "Create failed.")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, "<p>Created space %s</p><p><strong>Token (shown once):</strong> %s</p>", template.HTMLEscapeString(x.Space.Alias.String()), template.HTMLEscapeString(x.Token.Reveal()))
+		_ = dashboardTmpl.ExecuteTemplate(w, "admin-create", dashboardData{Space: x.Space, Reveal: x.Token.Reveal()})
 		return
 	}
 	const pre = "/spaces/"
-	if strings.HasPrefix(path, pre) {
-		bits := strings.Split(strings.TrimPrefix(path, pre), "/")
-		alias := bits[0]
-		if len(bits) == 2 && bits[1] == "delete" && r.Method == http.MethodPost {
-			_ = r.ParseForm()
-			reason := strings.TrimSpace(r.FormValue("reason"))
-			if reason == "" {
-				http.Error(w, "Reason required", 400)
-				return
-			}
-			if e := ad.AdminDeleteSpace(r.Context(), t, application.DeleteSpaceInput{Alias: alias, Force: true, Reason: reason}); e != nil {
-				http.Error(w, "Delete failed", 400)
-				return
-			}
-			http.Redirect(w, r, "/dashboard/admin", 303)
+	if !strings.HasPrefix(path, pre) {
+		dashboardForbidden(w)
+		return
+	}
+	bits := strings.Split(strings.TrimPrefix(path, pre), "/")
+	alias := bits[0]
+	if len(bits) == 2 && bits[1] == "delete" && r.Method == http.MethodPost {
+		reason := dashboardReason(r)
+		if reason == "" {
+			a.dashboardAdminError(w, "A reason is required to force delete a space.")
 			return
 		}
-		if len(bits) >= 3 && bits[1] == "links" {
-			name := bits[2]
-			if len(bits) == 4 && bits[3] == "logs" && r.Method == http.MethodGet {
-				x, e := ad.AdminLogsFor(r.Context(), t, alias, name, 100)
-				if e != nil {
-					dashboardForbidden(w)
-					return
-				}
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				for _, v := range x {
-					fmt.Fprintf(w, "<pre>%s</pre>", template.HTMLEscapeString(v.Text))
-				}
-				return
-			}
-			if len(bits) == 4 && (bits[3] == "restart" || bits[3] == "delete") && r.Method == http.MethodPost {
-				_ = r.ParseForm()
-				reason := strings.TrimSpace(r.FormValue("reason"))
-				var e error
-				if bits[3] == "restart" {
-					_, e = ad.AdminRestartLink(r.Context(), t, alias, name, reason)
-				} else {
-					e = ad.AdminDeleteLink(r.Context(), t, alias, name, reason)
-				}
-				if e != nil {
-					http.Error(w, "Operation failed", 400)
-					return
-				}
-				http.Redirect(w, r, "/dashboard/admin/spaces/"+url.PathEscape(alias), 303)
-				return
-			}
+		if e := ad.AdminDeleteSpace(r.Context(), t, application.DeleteSpaceInput{Alias: alias, Force: true, Reason: reason}); e != nil {
+			a.dashboardAdminError(w, "Force delete failed.")
+			return
 		}
-		if r.Method == http.MethodGet {
-			sp, e := ad.AdminGetSpace(r.Context(), t, alias)
-			if e != nil {
-				dashboardForbidden(w)
-				return
-			}
-			links, e := ad.AdminListLinks(r.Context(), t, alias)
+		w.Header().Set("HX-Redirect", "/dashboard/admin")
+		http.Redirect(w, r, "/dashboard/admin", http.StatusSeeOther)
+		return
+	}
+	if len(bits) >= 3 && bits[1] == "links" {
+		name := bits[2]
+		if len(bits) == 4 && bits[3] == "logs" && r.Method == http.MethodGet {
+			entries, e := ad.AdminLogsFor(r.Context(), t, alias, name, 100)
 			if e != nil {
 				dashboardForbidden(w)
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(w, "<!doctype html><html><body><h1>Admin space %s</h1><p>Expires %s</p><a href='/dashboard/admin'>All spaces</a><form hx-post='/dashboard/admin/spaces/%s/delete'><input name=reason required placeholder='Force-delete reason'><button>Force delete space</button></form><div id=links>", template.HTMLEscapeString(sp.Alias.String()), template.HTMLEscapeString(sp.ExpiresAt.Format(time.RFC3339)), url.PathEscape(alias))
-			for _, l := range links {
-				n := template.HTMLEscapeString(l.Name.String())
-				u := "/dashboard/admin/spaces/" + url.PathEscape(alias) + "/links/" + url.PathEscape(l.Name.String())
-				fmt.Fprintf(w, "<article><h2>%s</h2><button hx-get='%s/logs' hx-target='#logs-%s'>Logs</button><div id='logs-%s'></div><form hx-post='%s/restart'><input name=reason required placeholder=Reason><button>Restart</button></form><form hx-post='%s/delete'><input name=reason required placeholder=Reason><button>Delete</button></form></article>", n, u, n, n, u, u)
+			_ = dashboardTmpl.ExecuteTemplate(w, "admin-logs", dashboardData{Logs: map[string][]ports.LogEntry{name: entries}})
+			return
+		}
+		if len(bits) == 4 && (bits[3] == "restart" || bits[3] == "delete") && r.Method == http.MethodPost {
+			reason := dashboardReason(r)
+			if reason == "" {
+				a.dashboardAdminError(w, "A reason is required for this action.")
+				return
 			}
-			io.WriteString(w, "</div><script defer src='/dashboard/assets/dashboard.js'></script></body></html>")
+			var e error
+			if bits[3] == "restart" {
+				_, e = ad.AdminRestartLink(r.Context(), t, alias, name, reason)
+			} else {
+				e = ad.AdminDeleteLink(r.Context(), t, alias, name, reason)
+			}
+			if e != nil {
+				a.dashboardAdminError(w, "Operation failed.")
+				return
+			}
+			w.Header().Set("HX-Redirect", "/dashboard/admin/spaces/"+url.PathEscape(alias))
+			http.Redirect(w, r, "/dashboard/admin/spaces/"+url.PathEscape(alias), http.StatusSeeOther)
 			return
 		}
 	}
+	if r.Method == http.MethodGet {
+		sp, e := ad.AdminGetSpace(r.Context(), t, alias)
+		if e != nil {
+			dashboardForbidden(w)
+			return
+		}
+		links, e := ad.AdminListLinks(r.Context(), t, alias)
+		if e != nil {
+			dashboardForbidden(w)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		d := dashboardData{Title: "Mirage administration", Body: "admin-space-body", Home: "/dashboard/admin", Logout: true, Space: sp}
+		for _, l := range links {
+			d.Links = append(d.Links, dashboardLink{Name: l.Name.String(), Status: l.Status, ExpiresAt: l.ExpiresAt, Restarts: l.AutoRestart})
+		}
+		if e := dashboardTmpl.ExecuteTemplate(w, "admin-space", d); e != nil {
+			http.Error(w, "", 500)
+		}
+		return
+	}
 	dashboardForbidden(w)
+}
+func (a *API) dashboardAdminError(w http.ResponseWriter, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = dashboardTmpl.ExecuteTemplate(w, "error", dashboardData{Error: message})
 }
 func (a *API) renderAdmin(w http.ResponseWriter, r *http.Request, ad adminService, t domain.AdminToken, reveal string) {
 	xs, e := ad.AdminListSpaces(r.Context(), t)
@@ -523,9 +551,8 @@ func (a *API) renderAdmin(w http.ResponseWriter, r *http.Request, ad adminServic
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	io.WriteString(w, "<!doctype html><html><body><h1>Mirage administration</h1><form hx-post='/dashboard/logout'><button>Logout</button></form><h2>Create space</h2><form hx-post='/dashboard/admin/spaces' hx-target='#admin-result'><input name=ttl placeholder=TTL><input name=alias placeholder='optional alias'><button>Create</button></form><div id=admin-result></div><h2>Active spaces</h2><ul>")
-	for _, sp := range xs {
-		fmt.Fprintf(w, "<li><a href='/dashboard/admin/spaces/%s'>%s</a></li>", url.PathEscape(sp.Alias.String()), template.HTMLEscapeString(sp.Alias.String()))
+	d := dashboardData{Title: "Mirage administration", Body: "admin-body", Home: "/dashboard/admin", Logout: true, Spaces: xs, Reveal: reveal}
+	if e := dashboardTmpl.ExecuteTemplate(w, "admin", d); e != nil {
+		http.Error(w, "", 500)
 	}
-	io.WriteString(w, "</ul><script defer src='/dashboard/assets/dashboard.js'></script></body></html>")
 }
