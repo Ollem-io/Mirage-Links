@@ -1,3 +1,6 @@
+[env]
+CGO_ENABLED = "1"
+
 [tools]
 go = "1.26"
 caddy = "2.10.2"
@@ -62,3 +65,7 @@ depends = ["fmt-check", "lint", "test", "coverage", "build", "smoke"]
 [tasks.test-domain]
 description = "Run domain contract tests"
 run = "go test ./internal/domain"
+
+[tasks.test-libsql]
+description = "Run MIR-03 real embedded libSQL migration/CRUD/reopen artifact"
+run = "./scripts/libsql-integration.sh"

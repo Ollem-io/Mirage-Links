@@ -43,12 +43,22 @@ func (s LinkStatus) CanTransition(to LinkStatus) bool {
 	return false
 }
 
+// Link holds both desired execution state and lifecycle recovery metadata.
+// Credentials never belong here: only Space has the persisted token hash.
 type Link struct {
-	ID        LinkID     `json:"id"`
-	SpaceID   SpaceID    `json:"space_id"`
-	Name      LinkName   `json:"name"`
-	Status    LinkStatus `json:"status"`
-	ExpiresAt time.Time  `json:"expires_at"`
+	ID              LinkID        `json:"id"`
+	SpaceID         SpaceID       `json:"space_id"`
+	Name            LinkName      `json:"name"`
+	Status          LinkStatus    `json:"status"`
+	Command         string        `json:"-"`
+	Folder          string        `json:"-"`
+	HealthCheck     HealthCheck   `json:"health_check"`
+	Grace           time.Duration `json:"grace"`
+	ExpiresAt       time.Time     `json:"expires_at"`
+	AllocatedPort   int           `json:"allocated_port,omitempty"`
+	ProcessIdentity string        `json:"process_identity,omitempty"`
+	RestartCount    int           `json:"restart_count"`
+	NextRestartAt   time.Time     `json:"next_restart_at,omitempty"`
 }
 
 func (l *Link) Transition(to LinkStatus) error {
