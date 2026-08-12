@@ -149,7 +149,17 @@ func (m *mem) ExpiredLinks(_ context.Context, n time.Time) ([]domain.Link, error
 	}
 	return r, nil
 }
-func (m *mem) ReconciliationLinks(context.Context, time.Time) ([]domain.Link, error) { return nil, nil }
+func (m *mem) ReconciliationLinks(_ context.Context, now time.Time) ([]domain.Link, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := []domain.Link{}
+	for _, x := range m.links {
+		if !x.Expired(now) && !x.Status.Terminal() {
+			r = append(r, x)
+		}
+	}
+	return r, nil
+}
 func (m *mem) DeleteLink(_ context.Context, id domain.LinkID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

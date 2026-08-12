@@ -129,43 +129,29 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 		}
 	}
 	svc := &application.Service{Repo: store, Clock: clock{}, IDs: ids{}, Aliases: aliases{}, Tokens: tokens{}, Hashes: hashes{}, Ports: process.NewAllocator(), Processes: sup, Health: health.New(2 * time.Second), Proxy: proxy, Logs: logStore, Audit: store, BaseHost: base, PublicPort: portNumber(o.PublicAddress)}
-	// Initial cleanup/reconciliation completes before the management listener is bound.
-	if e = svc.Cleanup(ctx); e != nil {
+	// Reconciliation is the readiness gate: no private listener (and hence no mutation) is admitted until state is repaired.
+	if e = svc.Reconcile(ctx); e != nil {
 		if child != nil {
 			_ = child.Stop()
 		}
-		store.Close()
+		_ = store.Close()
 		return nil, e
 	}
-	links, e := store.ReconciliationLinks(ctx, time.Now().UTC())
-	if e != nil {
-		if child != nil {
-			_ = child.Stop()
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cleanupCtx.Done():
+				return
+			case <-ticker.C:
+				_ = svc.Reconcile(cleanupCtx)
+			}
 		}
-		store.Close()
-		return nil, e
-	}
-	routes := make([]ports.Route, 0, len(links))
-	for _, link := range links {
-		if link.Status != domain.StatusActive || link.AllocatedPort == 0 {
-			continue
-		}
-		sp, findErr := store.FindSpace(ctx, link.SpaceID)
-		if findErr != nil {
-			continue
-		}
-		route, routeErr := caddy.RouteFor(link.ID, base, link.Name, sp.Alias, link.AllocatedPort)
-		if routeErr == nil {
-			routes = append(routes, route)
-		}
-	}
-	if e = proxy.Reconcile(ctx, routes); e != nil {
-		if child != nil {
-			_ = child.Stop()
-		}
-		store.Close()
-		return nil, e
-	}
+	}()
 	api := NewHTTPAPI(svc)
 	var servers *httpapi.Servers
 	if managed {
@@ -174,19 +160,33 @@ func Start(ctx context.Context, o cli.StartOptions) (func() error, error) {
 		servers, e = StartHTTP(ListenerConfig{PublicAddress: o.PublicAddress, PrivateAddress: o.PrivateAddress}, api, http.NotFoundHandler())
 	}
 	if e != nil {
+		cleanupCancel()
+		<-cleanupDone
+		_ = svc.Shutdown(context.Background())
 		if child != nil {
 			_ = child.Stop()
 		}
-		store.Close()
+		_ = store.Close()
 		return nil, e
 	}
 	var once sync.Once
 	var out error
 	stop := func() error {
 		once.Do(func() {
-			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			out = ShutdownHTTP(shutdown, servers)
+			cleanupCancel()
+			select {
+			case <-cleanupDone:
+			case <-shutdown.Done():
+				if out == nil {
+					out = shutdown.Err()
+				}
+			}
+			if e := svc.Shutdown(shutdown); out == nil {
+				out = e
+			}
 			if child != nil {
 				if e := child.Stop(); out == nil {
 					out = e

@@ -98,6 +98,21 @@ func (c Command) doStart(a []string, conf config, path string) int {
 		}
 		a = a[2:]
 	}
+	// Validate the fully resolved listener addresses before composition starts
+	// Caddy, opens libSQL, or binds anything. This keeps malformed CLI input a
+	// side-effect-free usage error.
+	if o.PublicAddress == "" {
+		o.PublicAddress = ":9955"
+	}
+	if o.PrivateAddress == "" {
+		o.PrivateAddress = "127.0.0.1:9956"
+	}
+	if !validBind(o.PublicAddress) {
+		return c.fail(fmt.Errorf("invalid public bind address %q", o.PublicAddress))
+	}
+	if !validBind(o.PrivateAddress) {
+		return c.fail(fmt.Errorf("invalid private bind address %q", o.PrivateAddress))
+	}
 	stop, e := c.start(context.Background(), o)
 	if e != nil {
 		return c.fail(e)
@@ -729,9 +744,13 @@ type config struct {
 
 func loadConfig(path string, getenv func(string) string, getwd func() (string, error)) (config, error) {
 	var c config
+	// An operator-selected file is a contract: silently falling back after a
+	// typo could launch against unintended ports/data. Only the conventional
+	// implicit HOME default is optional.
+	explicit := path != ""
 	if path == "" {
 		if x := getenv("MIRAGE_CONFIG"); x != "" {
-			path = x
+			path, explicit = x, true
 		} else if home := getenv("HOME"); home != "" {
 			path = filepath.Join(home, ".config/mirage/config.yaml")
 		}
@@ -740,8 +759,11 @@ func loadConfig(path string, getenv func(string) string, getwd func() (string, e
 		return c, nil
 	}
 	b, e := os.ReadFile(path)
-	if os.IsNotExist(e) {
+	if os.IsNotExist(e) && !explicit {
 		return c, nil
+	}
+	if os.IsNotExist(e) {
+		return c, fmt.Errorf("config %q: %w", path, e)
 	}
 	if e != nil {
 		return c, e
